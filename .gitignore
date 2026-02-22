@@ -39,4 +39,11 @@ Thumbs.db
 # Project specific
 userdata/
 autostart.log
+autostart.log.*
 session_status
+
+# Security & Certificates
+*.pem
+*.crt
+*.key
+.credentials
