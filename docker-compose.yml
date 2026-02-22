@@ -45,11 +45,15 @@ services:
       - ./main.py:/app/main.py
       - ./static:/app/static
       - ${HOST_ROM_DIR}:/roms:ro
+      - ${HOST_SNES_ROM_DIR:-./userdata/snes}:/roms_snes:ro
+      - ${HOST_GBA_ROM_DIR:-./userdata/gba}:/roms_gba:ro
       - ${HOST_BIOS_DIR}:/bios:ro
       - ${HOST_CACHE_DIR}:/cache
       - ./userdata/covers:/app/userdata/covers
     environment:
       - ROM_DIR=/roms
+      - SNES_ROM_DIR=/roms_snes
+      - GBA_ROM_DIR=/roms_gba
       - BIOS_DIR=/bios
       - ROM_CACHE_DIR=/cache
       - HOST_ROM_DIR=${HOST_ROM_DIR}

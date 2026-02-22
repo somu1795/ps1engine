@@ -41,6 +41,37 @@ h1 {
     -webkit-text-fill-color: transparent;
 }
 
+.platform-tabs {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin-bottom: 2rem;
+    flex-wrap: wrap;
+}
+
+.platform-tab {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    padding: 0.8rem 1.5rem;
+    border-radius: 20px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-weight: 600;
+    font-family: inherit;
+    transition: all 0.3s ease;
+}
+
+.platform-tab:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.platform-tab.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+    box-shadow: 0 0 15px var(--accent-glow);
+}
+
 .game-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));

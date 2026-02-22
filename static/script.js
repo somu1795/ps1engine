@@ -8,6 +8,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     let currentSessionId = null;
     let monitorInterval = null;
+    let allRoms = {};
+    let currentPlatform = 'ps1';
 
     // --- Client Identification ---
     let clientId = localStorage.getItem('duckstation_client_id');
@@ -25,6 +27,44 @@ document.addEventListener('DOMContentLoaded', async () => {
     loadLibrary();
     refreshActiveSessions();
 
+    // Tab Synchronization Event Listener
+    window.addEventListener('storage', (e) => {
+        if (e.key === 'app_sync_game_launched') {
+            if (!theater.classList.contains('hidden') || isLaunching) {
+                console.log("Cross-tab action detected. Halting this game.");
+                exitTheater();
+                loader.classList.add('hidden');
+                grid.style.pointerEvents = 'auto';
+                isLaunching = false;
+
+                const Toast = Swal.mixin({
+                    toast: true,
+                    position: 'top-end',
+                    showConfirmButton: false,
+                    timer: 5000,
+                    timerProgressBar: true,
+                    background: '#1e1e2e',
+                    color: '#cdd6f4'
+                });
+                Toast.fire({
+                    icon: 'warning',
+                    title: 'Game paused! You started a session in another tab.'
+                });
+            }
+        }
+    });
+
+    // Tab Bar Logic
+    const tabs = document.querySelectorAll('.platform-tab');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', (e) => {
+            tabs.forEach(t => t.classList.remove('active'));
+            e.target.classList.add('active');
+            currentPlatform = e.target.getAttribute('data-platform');
+            renderGrid();
+        });
+    });
+
     // Periodically sync library state without flickering
     setInterval(() => {
         if (document.visibilityState === 'hidden') return;
@@ -39,42 +79,46 @@ document.addEventListener('DOMContentLoaded', async () => {
         try {
             const response = await fetch('/api/roms');
             if (!response.ok) throw new Error(`Server error: ${response.status}`);
-            const roms = await response.json();
-
-            grid.innerHTML = '';
-            if (roms.length === 0) {
-                grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; color: var(--text-secondary);">No ROMs found in library</div>';
-                return;
-            }
-
-            roms.forEach(rom => {
-                const card = document.createElement('div');
-                card.className = 'game-card';
-
-                // Construct card with poster
-                card.innerHTML = `
-                    <div class="game-poster-container">
-                        <img src="${rom.poster_url}" class="game-poster" alt="${rom.display_name}" loading="lazy">
-                        <div class="game-poster-overlay">
-                            <i class="fas fa-play"></i>
-                        </div>
-                    </div>
-                    <div class="game-title">${rom.display_name}</div>
-                `;
-
-                // Error fallback for posters
-                const img = card.querySelector('img');
-                img.onerror = () => {
-                    img.onerror = null;
-                    img.src = 'https://via.placeholder.com/300x400/1e1e2e/cdd6f4?text=PS1';
-                };
-
-                card.addEventListener('click', () => startGame(rom.filename));
-                grid.appendChild(card);
-            });
+            allRoms = await response.json();
+            renderGrid();
         } catch (error) {
             grid.innerHTML = '<div style="color: #ff4d4d; grid-column: 1/-1; text-align: center;">Error connecting to server</div>';
         }
+    }
+
+    function renderGrid() {
+        grid.innerHTML = '';
+        const roms = allRoms[currentPlatform] || [];
+
+        if (roms.length === 0) {
+            grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; color: var(--text-secondary);">No ROMs found in library for this platform</div>';
+            return;
+        }
+
+        roms.forEach(rom => {
+            const card = document.createElement('div');
+            card.className = 'game-card';
+
+            card.innerHTML = `
+                <div class="game-poster-container">
+                    <img src="${rom.poster_url}" class="game-poster" alt="${rom.display_name}" loading="lazy">
+                    <div class="game-poster-overlay">
+                        <i class="fas fa-play"></i>
+                    </div>
+                </div>
+                <div class="game-title">${rom.display_name}</div>
+            `;
+
+            const img = card.querySelector('img');
+            img.onerror = () => {
+                img.onerror = null;
+                const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="300" height="400" viewBox="0 0 300 400"><rect width="100%" height="100%" fill="#1e1e2e"/><text x="50%" y="50%" font-family="sans-serif" font-size="24" fill="#cdd6f4" text-anchor="middle" dominant-baseline="middle" font-weight="bold">${currentPlatform.toUpperCase()}</text></svg>`;
+                img.src = 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg);
+            };
+
+            card.addEventListener('click', () => startGame(rom.filename, rom.platform));
+            grid.appendChild(card);
+        });
     }
 
     async function refreshActiveSessions() {
@@ -141,7 +185,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 
-    async function startGame(filename) {
+    async function startGame(filename, platform) {
         if (isLaunching) return;
         isLaunching = true;
         launchAborted = false;
@@ -150,7 +194,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const loaderStatus = document.getElementById('loader-status');
         const loaderMsg = document.getElementById('loader-message');
         if (loaderStatus) loaderStatus.innerText = 'Initializing System';
-        if (loaderMsg) loaderMsg.innerText = 'Preparing container...';
+        if (loaderMsg) loaderMsg.innerText = 'Connecting to server...';
 
         grid.style.pointerEvents = 'none';
 
@@ -158,7 +202,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             const response = await fetch('/api/start-session', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ game_filename: filename, client_id: clientId })
+                body: JSON.stringify({ game_filename: filename, client_id: clientId, platform: platform })
             });
 
             if (!response.ok) {
@@ -170,11 +214,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             if (launchAborted) {
                 console.log("Launch aborted during allocation. Cleaning up ghost session:", sessionId);
-                apiStopSession(sessionId);
+                if (data.platform === 'ps1') apiStopSession(sessionId);
                 return;
             }
 
-            // Polling for readiness using Milestones
+            // WASM Quick-Boot bypass
+            if (data.platform && data.platform !== 'ps1') {
+                loader.classList.add('hidden');
+                isLaunching = false;
+                grid.style.pointerEvents = 'auto';
+                enterTheater(sessionId, data.url_path, filename, data.platform);
+                return;
+            }
+
+            // Docker Boot Polling for PS1...
             const startTime = Date.now();
             const TIMEOUT_MS = 90000; // 90 seconds max
 
@@ -228,16 +281,20 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    function enterTheater(sessionId, urlPath, title) {
+    function enterTheater(sessionId, urlPath, title, platform = 'ps1') {
         currentSessionId = sessionId;
-        // Clean multi-disc indicators and extensions
-        const cleanTitle = title.replace(/\s*\(Disc\s*\d+\)/gi, '').replace(/\.(zip|bin|cue|iso)$/i, '');
+        const cleanTitle = title.replace(/\s*\(Disc\s*\d+\)/gi, '').replace(/\.(zip|bin|cue|iso|smc|sfc|gba)$/i, '');
         theaterTitle.innerText = cleanTitle;
-        iframe.src = `${window.location.protocol}//${window.location.hostname}${urlPath}`;
+        iframe.src = urlPath;
         theater.classList.remove('hidden');
         document.body.style.overflow = 'hidden';
 
-        // Start High-Efficiency Heartbeat
+        // Broadcast to all other tabs to shut down their active iframes
+        localStorage.setItem('app_sync_game_launched', Date.now().toString());
+
+        if (platform !== 'ps1') return; // WASM platforms do not need remote heartbeat monitoring
+
+        // Start High-Efficiency Heartbeat for PS1 Docker Containers
         if (monitorInterval) clearInterval(monitorInterval);
         monitorInterval = setInterval(async () => {
             // Skip if tab hidden to save server resources

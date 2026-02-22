@@ -4,7 +4,7 @@ import docker
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 import os
 import requests
@@ -13,6 +13,7 @@ import glob
 import time
 import shutil
 import subprocess
+import urllib.parse
 import asyncio
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -194,6 +195,7 @@ def load_app_config():
     """Reloads configuration from config.env and updates global variables."""
     # We use global keyword to update the module-level variables
     global ROM_DIR, BIOS_DIR, NETWORK_NAME, IMAGE_NAME, ROM_CACHE_DIR, DOMAIN
+    global SNES_ROM_DIR, GBA_ROM_DIR
     global CPUS_PER_SESSION, ROM_CACHE_MAX_MB, COVERS_DIR, MEM_LIMIT_PER_SESSION
     global MAX_HOST_CPU_PERCENT, MAX_HOST_MEM_PERCENT, RATE_LIMIT_SESSIONS_PER_MIN
     global ENABLE_DEBUG_MODE
@@ -203,6 +205,8 @@ def load_app_config():
     
     ENABLE_DEBUG_MODE = os.getenv("ENABLE_DEBUG_MODE", "false").lower() == "true"
     ROM_DIR = os.getenv("ROM_DIR", "/roms")
+    SNES_ROM_DIR = os.getenv("SNES_ROM_DIR", "/roms_snes")
+    GBA_ROM_DIR = os.getenv("GBA_ROM_DIR", "/roms_gba")
     BIOS_DIR = os.getenv("BIOS_DIR", "/bios")
     NETWORK_NAME = os.getenv("NETWORK_NAME", "emulator-net")
     IMAGE_NAME = os.getenv("IMAGE_NAME", "custom-duckstation")
@@ -299,6 +303,11 @@ def verify_paths():
                 logger.error(f"❌ ERROR: Could not create {name} at {path}: {e}")
                 sys.exit(1)
 
+    for name, path in {"SNES_ROM_DIR": SNES_ROM_DIR, "GBA_ROM_DIR": GBA_ROM_DIR}.items():
+        if not os.path.exists(path):
+            try: os.makedirs(path, exist_ok=True)
+            except: pass
+
 verify_paths()
 
 # --- ROM Cache Helpers ---
@@ -371,6 +380,7 @@ def _ensure_cache_dir():
 class SessionRequest(BaseModel):
     game_filename: str
     client_id: str | None = None
+    platform: str = "ps1"
 
 class StopRequest(BaseModel):
     client_id: str
@@ -427,7 +437,20 @@ async def start_session(request: SessionRequest):
                     logger.error(f"Error removing old container: {e}")
 
     session_id = str(uuid.uuid4())[:8]
-    logger.info(f"Creating new session {session_id} for game {request.game_filename}")
+
+    # Universal Enforce 1: If it's a WASM platform, immediately return static route after killing container
+    if request.platform != "ps1":
+        logger.info(f"Creating WASM session for {request.platform}: {request.game_filename}")
+        encoded_rom = urllib.parse.quote(request.game_filename)
+        return {
+            "session_id": session_id, 
+            "url_path": f"/emulator.html?core={request.platform}&rom=/rom-files/{request.platform}/{encoded_rom}", 
+            "username": "player", 
+            "password": "",
+            "platform": request.platform
+        }
+
+    logger.info(f"Creating new Docker session {session_id} for game {request.game_filename}")
     password = secrets.token_urlsafe(8)
     mounts = []
     scale = int(os.getenv("RESOLUTION_SCALE", "1"))
@@ -669,13 +692,36 @@ async def get_rom_art(game_id: str):
     
     # Smart Fetcher: Try to find the name from the cache mapping
     try:
-        # 1. Try to find the best match in the currently loaded ROM list
-        all_zips = glob.glob(os.path.join(ROM_DIR, "*.zip"))
         target_name = None
+        platform = "ps1"
+        
+        # 1. Try PS1
+        all_zips = glob.glob(os.path.join(ROM_DIR, "*.zip"))
         for f in all_zips:
             if _safe_cache_key(_identify_disc_set(os.path.basename(f))) == game_id:
                 target_name = _identify_disc_set(os.path.basename(f)).replace(".zip", "").replace(".ZIP", "")
+                platform = "ps1"
                 break
+                
+        # 2. Try SNES
+        if not target_name:
+            for f in glob.glob(os.path.join(SNES_ROM_DIR, "*.zip")):
+                name = os.path.basename(f)
+                s_name = os.path.splitext(name)[0]
+                if _safe_cache_key(s_name) == game_id:
+                    target_name = s_name
+                    platform = "snes"
+                    break
+                    
+        # 3. Try GBA
+        if not target_name:
+            for f in glob.glob(os.path.join(GBA_ROM_DIR, "*.zip")):
+                name = os.path.basename(f)
+                g_name = os.path.splitext(name)[0]
+                if _safe_cache_key(g_name) == game_id:
+                    target_name = g_name
+                    platform = "gba"
+                    break
         
         if target_name:
             # Libretro replacement rules: &*/:<>?\| -> _
@@ -683,7 +729,14 @@ async def get_rom_art(game_id: str):
             for char in "&*/:<>?\\|":
                 libretro_name = libretro_name.replace(char, "_")
             
-            remote_url = f"https://raw.githubusercontent.com/libretro-thumbnails/Sony_-_PlayStation/master/Named_Boxarts/{libretro_name}.png"
+            repo_map = {
+                "ps1": "Sony_-_PlayStation",
+                "snes": "Nintendo_-_Super_Nintendo_Entertainment_System",
+                "gba": "Nintendo_-_Game_Boy_Advance"
+            }
+            repo = repo_map[platform]
+            
+            remote_url = f"https://raw.githubusercontent.com/libretro-thumbnails/{repo}/master/Named_Boxarts/{libretro_name}.png"
             
             # Use a short timeout for the check
             resp = requests.get(remote_url, timeout=5, stream=True)
@@ -695,9 +748,17 @@ async def get_rom_art(game_id: str):
     except Exception as e:
         logger.warning(f"Cover fetch error for {game_id}: {e}")
 
-    # Fallback to a styled placeholder
-    placeholder = f"https://via.placeholder.com/300x400/1e1e2e/cdd6f4?text={game_id.replace('_', '+').upper()}"
-    return RedirectResponse(url=placeholder, headers=cache_headers)
+    # Fallback to a styled SVG placeholder
+    clean_name = game_id.replace('_', ' ').upper()
+    if len(clean_name) > 25: clean_name = clean_name[:22] + '...'
+    
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="300" height="400" viewBox="0 0 300 400">
+        <rect width="100%" height="100%" fill="#1e1e2e"/>
+        <text x="50%" y="50%" font-family="sans-serif" font-size="18" fill="#cdd6f4" text-anchor="middle" dominant-baseline="middle" font-weight="bold">
+            {clean_name}
+        </text>
+    </svg>"""
+    return Response(content=svg, media_type="image/svg+xml", headers=cache_headers)
 
 @app.get("/admin")
 def get_admin_page():
@@ -727,16 +788,41 @@ def list_roms():
             "filename": filename,
             "display_name": clean_name,
             "game_id": game_id,
-            "poster_url": f"/api/rom-art/{game_id}"
+            "poster_url": f"/api/rom-art/{game_id}",
+            "platform": "ps1"
         })
         
+    snes_roms, gba_roms = [], []
+    for f_path in glob.glob(os.path.join(SNES_ROM_DIR, "*.zip")):
+        if f_path.lower().endswith('.zip'):
+            name = os.path.basename(f_path)
+            s_name = os.path.splitext(name)[0]
+            snes_roms.append({"filename": name, "display_name": s_name, "game_id": _safe_cache_key(s_name), "poster_url": f"/api/rom-art/{_safe_cache_key(s_name)}", "platform": "snes"})
+            
+    for f_path in glob.glob(os.path.join(GBA_ROM_DIR, "*.zip")):
+        if f_path.lower().endswith('.zip'):
+            name = os.path.basename(f_path)
+            g_name = os.path.splitext(name)[0]
+            gba_roms.append({"filename": name, "display_name": g_name, "game_id": _safe_cache_key(g_name), "poster_url": f"/api/rom-art/{_safe_cache_key(g_name)}", "platform": "gba"})
+
     if debug_enabled: 
         rom_data.insert(0, {
             "filename": "DEBUG_MODE_FULL_ACCESS", 
             "display_name": "DEBUG_MODE_FULL_ACCESS",
             "game_id": "debug",
-            "poster_url": ""
+            "poster_url": "",
+            "platform": "ps1"
         })
-    return rom_data
+        
+    return {
+        "ps1": rom_data,
+        "snes": sorted(snes_roms, key=lambda x: x['display_name']),
+        "gba": sorted(gba_roms, key=lambda x: x['display_name'])
+    }
 
+# Initialize static mounts safely outside
+if os.path.exists(SNES_ROM_DIR):
+    app.mount("/rom-files/snes", StaticFiles(directory=SNES_ROM_DIR), name="roms_snes")
+if os.path.exists(GBA_ROM_DIR):
+    app.mount("/rom-files/gba", StaticFiles(directory=GBA_ROM_DIR), name="roms_gba")
 app.mount("/", StaticFiles(directory="static", html=True), name="static")

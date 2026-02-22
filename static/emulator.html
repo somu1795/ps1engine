@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>Web Emulator</title>
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+
+        #game {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Force crisp rendering on 2K/4K screens instead of blurry bilinear default */
+        canvas {
+            image-rendering: -moz-crisp-edges;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: crisp-edges;
+            image-rendering: pixelated;
+        }
+    </style>
+</head>
+
+<body>
+    <div style="width:100%;height:100%;max-width:100%">
+        <div id="game"></div>
+    </div>
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const core = urlParams.get('core') || 'snes'; // Default fallback
+        const romUrl = urlParams.get('rom');
+
+        // Map internal shortnames to EmulatorJS core names
+        const coreMap = {
+            'snes': 'snes9x',
+            'gba': 'mgba',
+            'nes': 'fceumm',
+            'genesis': 'genesis_plus_gx'
+        };
+
+        window.EJS_player = '#game';
+        window.EJS_core = coreMap[core] || core;
+        window.EJS_gameUrl = romUrl;
+
+        // Critical: The CDN path must be exact and official.
+        window.EJS_pathtodata = 'https://cdn.emulatorjs.org/stable/data/';
+
+        // Fix bluriness on high-res displays
+        window.EJS_VirtualGamepadSettings = {
+            zoneColor: "#7c4dff"
+        };
+        // By default, emulator.js stretches the canvas with CSS bilinear filtering. 
+        // We set image-rendering to pixelated in CSS, but let's also pass the EJS flag.
+        window.EJS_defaultOptions = {
+            'image-rendering': 'pixelated', // Keep pixels sharp
+            'maintainAspectRatio': true     // Don't stretch 4:3 games to widescreen
+        };
+
+        // Match our site's purple theme
+        window.EJS_color = '#bb86fc';
+        window.EJS_startOnLoaded = true;
+        // Optionally, adding a subtle scanline filter makes 2D games pop on 2K/4K screens
+        window.EJS_defaultOptions['shader'] = 'crt-easymode'; 
+    </script>
+    <script src="https://cdn.emulatorjs.org/stable/data/loader.js"></script>
+</body>
+
+</html>
