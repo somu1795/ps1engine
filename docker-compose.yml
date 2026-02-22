@@ -1,0 +1,109 @@
+services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    command:
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--accesslog=true"
+      - "--serverstransport.insecureSkipVerify=true"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./cert.pem:/etc/traefik/certs/cert.pem:ro
+      - ./key.pem:/etc/traefik/certs/key.pem:ro
+      - ./traefik_dynamic.yml:/etc/traefik/dynamic/conf.yml:ro
+      - ./.credentials:/etc/traefik/.credentials:ro
+    networks:
+      - emulator-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-dashboard.rule=(Host(`${DOMAIN_LOCAL}`) || Host(`${DOMAIN_REMOTE}`)) && (PathPrefix(`/dashboard`) || PathPrefix(`/api`))"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard.tls=true"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.middlewares=admin-auth@file"
+      - "traefik.http.routers.traefik-dashboard.priority=20"
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    container_name: ps1-orchestrator
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.env:/app/config.env
+      - ./main.py:/app/main.py
+      - ./static:/app/static
+      - ${HOST_ROM_DIR}:/roms:ro
+      - ${HOST_BIOS_DIR}:/bios:ro
+      - ${HOST_CACHE_DIR}:/cache
+      - ./userdata/covers:/app/userdata/covers
+    environment:
+      - ROM_DIR=/roms
+      - BIOS_DIR=/bios
+      - ROM_CACHE_DIR=/cache
+      - HOST_ROM_DIR=${HOST_ROM_DIR}
+      - HOST_BIOS_DIR=${HOST_BIOS_DIR}
+      - HOST_CACHE_DIR=${HOST_CACHE_DIR}
+    env_file: .env
+    labels:
+      - "traefik.enable=true"
+      # Main Router (Frontend)
+      - "traefik.http.routers.orchestrator.rule=Host(`${DOMAIN_LOCAL}`) || Host(`${DOMAIN_REMOTE}`) || PathPrefix(`/`)"
+      - "traefik.http.routers.orchestrator.entrypoints=web"
+      - "traefik.http.routers.orchestrator.priority=1"
+      - "traefik.http.services.orchestrator.loadbalancer.server.port=8000"
+      
+      # Secure Main Router (Frontend)
+      - "traefik.http.routers.orchestrator-secure.rule=Host(`${DOMAIN_LOCAL}`) || Host(`${DOMAIN_REMOTE}`) || PathPrefix(`/`)"
+      - "traefik.http.routers.orchestrator-secure.entrypoints=websecure"
+      - "traefik.http.routers.orchestrator-secure.tls=true"
+      - "traefik.http.routers.orchestrator-secure.priority=1"
+
+      # Public API Router (High priority to avoid dashboard conflict)
+      - "traefik.http.routers.orchestrator-api.rule=(Host(`${DOMAIN_LOCAL}`) || Host(`${DOMAIN_REMOTE}`)) && (PathPrefix(`/api/roms`) || PathPrefix(`/api/start-session`) || PathPrefix(`/api/active-sessions`) || PathPrefix(`/api/session-status`) || PathPrefix(`/api/stop-session`) || PathPrefix(`/api/rom-art`))"
+      - "traefik.http.routers.orchestrator-api.entrypoints=web,websecure"
+      - "traefik.http.routers.orchestrator-api.tls=true"
+      - "traefik.http.routers.orchestrator-api.priority=30"
+
+      # Router Priorities
+      - "traefik.http.routers.orchestrator-admin.rule=(Host(`${DOMAIN_LOCAL}`) || Host(`${DOMAIN_REMOTE}`)) && (PathPrefix(`/admin`) || PathPrefix(`/api/admin/`))"
+      - "traefik.http.routers.orchestrator-admin.entrypoints=web,websecure"
+      - "traefik.http.routers.orchestrator-admin.tls=true"
+      - "traefik.http.routers.orchestrator-admin.middlewares=admin-auth@file"
+      - "traefik.http.routers.orchestrator-admin.priority=40"
+    networks:
+      - emulator-net
+    restart: unless-stopped
+
+  watchdog:
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestrator
+    container_name: ps1-watchdog
+    command: python -u watchdog.py
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./watchdog.py:/app/watchdog.py
+      - ./config.env:/app/config.env
+    environment:
+      - CONFIG_ENV_PATH=/app/config.env
+    networks:
+      - emulator-net
+    restart: unless-stopped
+
+networks:
+  emulator-net:
+    name: emulator-net
+    driver: bridge
+

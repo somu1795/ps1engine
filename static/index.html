@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PS1 Cloud Arcade</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>Select Your Game</h1>
+            <p>Choose a title to begin your cloud session</p>
+        </header>
+
+        <div id="active-sessions-container" class="active-sessions hidden">
+            <h2>⚡ Running Sessions</h2>
+            <div id="session-list" class="session-list"></div>
+        </div>
+
+        <div id="game-grid" class="game-grid">
+            <!-- Games will be injected here -->
+            <div class="loading">Loading Library...</div>
+        </div>
+    </div>
+
+    <div id="loader-overlay" class="hidden"> <!-- Loader State -->
+        <div id="loader-content">
+            <div class="loader-spinner-container">
+                <div class="loader-ring"></div>
+                <div class="loader-ring-inner"></div>
+            </div>
+
+            <h2 id="loader-status">Initializing System</h2>
+
+            <div class="milestone-track">
+                <div id="milestone-pulse" class="milestone-pulse"></div>
+            </div>
+
+            <p id="loader-message">Preparing container...</p>
+
+            <button id="btn-cancel-launch" class="btn btn-danger">Cancel Launch</button>
+        </div>
+    </div>
+
+    <div id="theater-view" class="hidden">
+        <div class="theater-header">
+            <span id="theater-game-title">Game Title</span>
+            <button id="btn-back-to-library" class="btn btn-resume">Back to Library</button>
+        </div>
+        <div class="theater-content">
+            <iframe id="game-iframe" frameborder="0" allow="fullscreen; clipboard-read; clipboard-write"></iframe>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

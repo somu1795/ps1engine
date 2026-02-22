@@ -1,0 +1,16 @@
+
+http:
+  middlewares:
+    admin-auth:
+      basicAuth:
+        usersFile: /etc/traefik/.credentials
+
+tls:
+  certificates:
+    - certFile: /etc/traefik/certs/cert.pem
+      keyFile: /etc/traefik/certs/key.pem
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/certs/cert.pem
+        keyFile: /etc/traefik/certs/key.pem

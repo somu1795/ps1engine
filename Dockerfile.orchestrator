@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the application code
+COPY main.py .
+COPY watchdog.py .
+COPY static ./static
+COPY config.env .
+
+# The orchestrator needs the docker binary (or just the library is enough if it uses the socket)
+# The python 'docker' library communicates via the socket, so no need for the binary.
+
+EXPOSE 8000
+
+# CMD will be overridden in docker-compose for each service
