@@ -1,10 +1,14 @@
 # PS1 Engine User Guide & Walkthrough
 
+## Initial Setup
+1. Copy `.env.example` to `.env` and configure your absolute ROM directory paths.
+2. Copy `config.env.example` to `config.env` and adjust server quotas or resolutions as needed.
+
 ## Quick Start
 - **Start Engine:** `./start.sh` (Always rebuilds containers and pulls latest configuration)
 - **Stop Engine:** `./stop.sh`
 
-## Configuration
+## Configuration Features
 A central configuration file is available at `config.env`. You can edit this file to change resolution, resource limits, and streaming quality.
 
 ```ini
