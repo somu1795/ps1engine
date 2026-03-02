@@ -278,6 +278,7 @@ DuckStation hangs in non-interactive environments. The `launch_duck.py` script a
 - **Flow**: Extraction happens once on the host. Subsequent sessions mount pre-extracted files.
 - **Disk Safety**: Enforces `ROM_CACHE_MAX_MB` limit (default 5GB).
 - **Locking**: Uses `fcntl.flock` advisory locks to prevent concurrent extraction corruption.
+- **Multi-disc parallel extraction**: Uses `ThreadPoolExecutor` to extract all disc ZIPs in parallel (each disc has uniquely named files, so no collision risk).
 
 ### 3. Update Check Blackholing
 Docker `extra_hosts` maps `github.com` and `api.github.com` to `0.0.0.0`, instantly failing update checks.
@@ -289,16 +290,25 @@ Docker `extra_hosts` maps `github.com` and `api.github.com` to `0.0.0.0`, instan
 Linux advisory file locking (`fcntl`) with per-ROM `.lock` files prevents parallel extraction corruption.
 
 ### 6. Watchdog Grace Period
-A 120-second grace period ensures containers aren't killed before they finish booting.
+A 120-second grace period ensures containers aren't killed before they finish booting. Activity checks run in parallel via `ThreadPoolExecutor`; all dict mutations happen sequentially in the main thread to prevent race conditions.
 
 ### 7. Multi-Disc Set Detection
 Games with "(Disc X)" in the filename are grouped. A virtual `playlist.m3u` is generated for live disc swapping.
 
 ### 8. Smart Art Fetcher & Cache
-`/api/rom-art` converts game names to Libretro-compatible slugs, downloads official box art, and caches locally. Browser cache: 30 days.
+`/api/rom-art` converts game names to Libretro-compatible slugs, downloads official box art via `run_in_executor` (non-blocking), and caches locally. Browser cache: 30 days.
 
 ### 9. Container Recycling Loops
 Verification loop waits up to 10s for container removal before spawning a replacement.
+
+### 10. Orchestrator-Driven Session Termination
+When DuckStation exits, the PTY launcher writes `STOPPED` to `/tmp/session_status`. The orchestrator's background heartbeat detects this and terminates the container via the Docker API. This replaced the previous `sudo kill 1` approach which broke when `DISABLE_SUDO=true` was added for security hardening.
+
+### 11. Xvfb Resolution Clamping
+The `MAX_RES`, `SELKIES_MANUAL_WIDTH`, and `SELKIES_MANUAL_HEIGHT` env vars are injected to clamp the X11 virtual framebuffer to the game's actual streaming resolution (e.g., `1024x768`) instead of the base image default of `15360x8640`. This reduces Xvfb memory from ~500MB to ~70MB per session.
+
+### 12. Parallel ROM Listing
+The `/api/roms` endpoint runs `glob.glob()` for PS1, SNES, and GBA directories in parallel via `asyncio.gather` + `run_in_executor`, reducing wall time on network mounts (CIFS/NFS).
 
 ---
 
@@ -319,6 +329,7 @@ Verification loop waits up to 10s for container removal before spawning a replac
 
 ## 🏎️ Scaling & Resource Limits
 
+### Session Containers
 | Limit | Config Variable | Default | How Enforced |
 |---|---|---|---|
 | CPU per session | `CPUS_PER_SESSION` | `2.0` | Docker `nano_cpus` |
@@ -328,6 +339,13 @@ Verification loop waits up to 10s for container removal before spawning a replac
 | Launch rate | `RATE_LIMIT_SESSIONS_PER_MIN` | `3` | Per-client sliding window |
 | Resolution profile | `RESOLUTION_SCALE` | `1` | Software (1) vs Vulkan (2+) |
 | Stream bandwidth | `STREAM_BITRATE` | `2000` | Selkies `SELKIES_VIDEO_BITRATE` |
+
+### Infrastructure Containers (`docker-compose.yml`)
+| Container | Memory Limit | Typical Usage |
+|---|---|---|
+| Traefik | `256m` | ~50MB |
+| Orchestrator | `512m` | ~40MB |
+| Watchdog | `128m` | ~20MB |
 
 ---
 
@@ -348,6 +366,7 @@ Verification loop waits up to 10s for container removal before spawning a replac
 | `start.sh` | Build & launch script (builds image, starts compose) |
 | `stop.sh` | Teardown script (kills sessions, stops compose, cleans locks) |
 | `static/` | Frontend SPA (HTML, CSS, JS), admin dashboard |
+| `LICENSE` | AGPL-3.0 license |
 | `tests/` | Unit and regression tests |
 
 ---
