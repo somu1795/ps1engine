@@ -348,3 +348,27 @@ Verification loop waits up to 10s for container removal before spawning a replac
 | `start.sh` | Build & launch script (builds image, starts compose) |
 | `stop.sh` | Teardown script (kills sessions, stops compose, cleans locks) |
 | `static/` | Frontend SPA (HTML, CSS, JS), admin dashboard |
+| `tests/` | Unit and regression tests |
+
+---
+
+## 🧪 Testing
+
+The engine includes a comprehensive regression test suite located in `tests/test_engine.py`.
+
+### Execution
+You can run the full test suite using pytest:
+```bash
+pytest tests/test_engine.py -v --tb=short
+```
+
+### Architecture & Coverage
+The test suite uses the `pytest` framework and heavily relies on `unittest.mock` to validate logic *without* needing a live Docker daemon or heavy containers. It specifically mocks `docker.from_env()`.
+
+**Key Test Coverage Area:**
+1. **Configuration Cascade**: Verifies fallback defaults and parsing logic for `.env` and `config.env` overrides.
+2. **Rate Limiting**: Tests the sliding window implementation.
+3. **Multi-Disc Detection**: Validates Regex patterns matching sibling discs `(Disc 1)`, `(Disc 2)`, etc.
+4. **Graphics Selection**: Checks the resolution scale-to-renderer mapping (`Software` vs `Vulkan`).
+5. **Security Hardening**: Asserts that critical security variables (e.g. `DISABLE_SUDO`, `HARDEN_DESKTOP`) are present.
+6. **Watchdog**: Verifies grace period logic and API status matching.
