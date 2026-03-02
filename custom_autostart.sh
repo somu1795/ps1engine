@@ -44,6 +44,7 @@ mkdir -p /config/.config/duckstation
 : ${PGXP_TEXTURE:=false}
 : ${VSYNC:=false}
 : ${AUDIO_BACKEND:=Cubeb}
+: ${SHOW_FPS:=false}
 
 echo "[$(date)] Applying Config: Renderer=${RENDERER}, Scale=${RESOLUTION_SCALE}, Filter=${TEXTURE_FILTERING}, VSync=${VSYNC}" >> /config/autostart.log
 
@@ -85,6 +86,9 @@ VSync = ${VSYNC}
 
 [Audio]
 Backend = ${AUDIO_BACKEND}
+
+[Display]
+ShowFPS = ${SHOW_FPS}
 
 [Logging]
 LogLevel = Debug

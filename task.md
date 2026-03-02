@@ -78,3 +78,15 @@
 
 ## Verification
 - [x] Verify Code Structure <!-- id: 8 -->
+
+## Config Variables Introduced Per Milestone
+| Milestone | Variables |
+|---|---|
+| Initial Scaffold | `NETWORK_NAME`, `IMAGE_NAME` |
+| API & Static Files | `RESOLUTION_SCALE`, `STREAM_BITRATE`, `STREAM_FRAMERATE` |
+| Watchdog | `IDLE_TIMEOUT_MINS` |
+| Debug Mode | `ENABLE_DEBUG_MODE` |
+| Performance Tuning | `CPUS_PER_SESSION`, `MEM_LIMIT_PER_SESSION`, `MAX_HOST_CPU_PERCENT`, `MAX_HOST_MEM_PERCENT`, `RATE_LIMIT_SESSIONS_PER_MIN` |
+| Cache System | `ROM_CACHE_MAX_MB` |
+| Audio Fix | `AUDIO_BACKEND` |
+| Unified Config | All variables consolidated into `config.env` |

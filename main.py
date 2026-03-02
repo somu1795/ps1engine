@@ -454,6 +454,8 @@ async def start_session(request: SessionRequest):
     password = secrets.token_urlsafe(8)
     mounts = []
     scale = int(os.getenv("RESOLUTION_SCALE", "1"))
+    stream_quality = int(os.getenv("STREAM_QUALITY", "50"))
+    h264_crf = 50 - int((stream_quality / 100) * 45)  # quality 1-100 → CRF 50-5 (lower CRF = better)
     if scale <= 1:
         renderer, filtering, pgxp_geo, pgxp_tex, true_color, display_w, display_h = "Software", "0", "false", "false", "false", 1024, 768
     elif scale == 2:
@@ -468,7 +470,9 @@ async def start_session(request: SessionRequest):
         "PGXP_GEOMETRY": pgxp_geo, "PGXP_TEXTURE": pgxp_tex, "VSYNC": "false", "AUDIO_BACKEND": os.getenv("AUDIO_BACKEND", "Cubeb"),
         "SELKIES_MANUAL_WIDTH": display_w, "SELKIES_MANUAL_HEIGHT": display_h,
         "SELKIES_VIDEO_BITRATE": os.getenv("STREAM_BITRATE", "2000"), "SELKIES_VIDEO_FRAMERATE": os.getenv("STREAM_FRAMERATE", "30"),
+        "SELKIES_H264_CRF": str(h264_crf),
         "SELKIES_AUDIO_BITRATE": "320000",
+        "SHOW_FPS": os.getenv("SHOW_FPS", "false"),
         "GAME_NAME": _identify_disc_set(request.game_filename).replace(".zip", "").replace(".ZIP", ""),
         # Security & Hardening Overrides
         "HARDEN_DESKTOP": "true", "DISABLE_OPEN_TOOLS": "true", "DISABLE_SUDO": "true", 
@@ -629,6 +633,8 @@ def stop_session(session_id: str, request: StopRequest):
         return {"status": "success"}
     except docker.errors.NotFound:
         return {"status": "already_gone"}
+    except HTTPException:
+        raise
     except Exception as e: 
         logging.error(f"FATAL stop_session error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
