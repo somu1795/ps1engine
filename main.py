@@ -24,6 +24,7 @@ from collections import defaultdict
 import fcntl
 import sys
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 
 # Load unified config
 CONFIG_ENV_PATH = os.getenv("CONFIG_ENV_PATH", "config.env")
@@ -363,11 +364,15 @@ def get_or_extract_rom_set(filenames: list[str]) -> str | None:
         shutil.rmtree(cache_dir, ignore_errors=True)
         os.makedirs(cache_dir, exist_ok=True)
         
-        for fname in filenames:
+        def _extract_single(fname):
             zip_path = os.path.join(ROM_DIR, fname)
             logger.info(f"Extracting part of set: {fname}...")
             with zipfile.ZipFile(zip_path, 'r') as zf:
                 zf.extractall(cache_dir)
+        
+        # Extract all discs in parallel (each disc has uniquely named files)
+        with ThreadPoolExecutor(max_workers=min(len(filenames), 4)) as executor:
+            list(executor.map(_extract_single, filenames))
         
         subprocess.run(["chmod", "-R", "755", cache_dir], timeout=10)
         open(done_marker, 'w').close()
@@ -701,8 +706,8 @@ async def get_rom_art(game_id: str):
     if os.path.exists(local_path):
         return FileResponse(local_path, headers=cache_headers)
     
-    # Smart Fetcher: Try to find the name from the cache mapping
-    try:
+    def _fetch_cover():
+        """Blocking cover art lookup + download, run in executor to avoid blocking event loop."""
         target_name = None
         platform = "ps1"
         
@@ -734,28 +739,37 @@ async def get_rom_art(game_id: str):
                     platform = "gba"
                     break
         
-        if target_name:
-            # Libretro replacement rules: &*/:<>?\| -> _
-            libretro_name = target_name
-            for char in "&*/:<>?\\|":
-                libretro_name = libretro_name.replace(char, "_")
+        if not target_name:
+            return None
             
-            repo_map = {
-                "ps1": "Sony_-_PlayStation",
-                "snes": "Nintendo_-_Super_Nintendo_Entertainment_System",
-                "gba": "Nintendo_-_Game_Boy_Advance"
-            }
-            repo = repo_map[platform]
-            
-            remote_url = f"https://raw.githubusercontent.com/libretro-thumbnails/{repo}/master/Named_Boxarts/{libretro_name}.png"
-            
-            # Use a short timeout for the check
-            resp = requests.get(remote_url, timeout=5, stream=True)
-            if resp.status_code == 200:
-                with open(local_path, 'wb') as f:
-                    for chunk in resp.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                return FileResponse(local_path, headers=cache_headers)
+        # Libretro replacement rules: &*/:<>?\| -> _
+        libretro_name = target_name
+        for char in "&*/:<>?\\|":
+            libretro_name = libretro_name.replace(char, "_")
+        
+        repo_map = {
+            "ps1": "Sony_-_PlayStation",
+            "snes": "Nintendo_-_Super_Nintendo_Entertainment_System",
+            "gba": "Nintendo_-_Game_Boy_Advance"
+        }
+        repo = repo_map[platform]
+        
+        remote_url = f"https://raw.githubusercontent.com/libretro-thumbnails/{repo}/master/Named_Boxarts/{libretro_name}.png"
+        
+        resp = requests.get(remote_url, timeout=5, stream=True)
+        if resp.status_code == 200:
+            with open(local_path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return local_path
+        return None
+    
+    # Run blocking I/O in executor to avoid blocking the event loop
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _fetch_cover)
+        if result:
+            return FileResponse(local_path, headers=cache_headers)
     except Exception as e:
         logger.warning(f"Cover fetch error for {game_id}: {e}")
 
@@ -776,11 +790,21 @@ def get_admin_page():
     return FileResponse("static/admin.html")
 
 @app.get("/api/roms")
-def list_roms():
+async def list_roms():
     load_app_config()
     debug_enabled = ENABLE_DEBUG_MODE
+    loop = asyncio.get_event_loop()
     
-    all_zips = glob.glob(os.path.join(ROM_DIR, "*.zip"))
+    # Run all 3 glob operations in parallel (significant on network mounts)
+    def _glob_ps1(): return glob.glob(os.path.join(ROM_DIR, "*.zip"))
+    def _glob_snes(): return glob.glob(os.path.join(SNES_ROM_DIR, "*.zip"))
+    def _glob_gba(): return glob.glob(os.path.join(GBA_ROM_DIR, "*.zip"))
+    
+    ps1_future = loop.run_in_executor(None, _glob_ps1)
+    snes_future = loop.run_in_executor(None, _glob_snes)
+    gba_future = loop.run_in_executor(None, _glob_gba)
+    all_zips, snes_zips, gba_zips = await asyncio.gather(ps1_future, snes_future, gba_future)
+    
     seen_sets = set()
     rom_data = []
     
@@ -804,13 +828,13 @@ def list_roms():
         })
         
     snes_roms, gba_roms = [], []
-    for f_path in glob.glob(os.path.join(SNES_ROM_DIR, "*.zip")):
+    for f_path in snes_zips:
         if f_path.lower().endswith('.zip'):
             name = os.path.basename(f_path)
             s_name = os.path.splitext(name)[0]
             snes_roms.append({"filename": name, "display_name": s_name, "game_id": _safe_cache_key(s_name), "poster_url": f"/api/rom-art/{_safe_cache_key(s_name)}", "platform": "snes"})
             
-    for f_path in glob.glob(os.path.join(GBA_ROM_DIR, "*.zip")):
+    for f_path in gba_zips:
         if f_path.lower().endswith('.zip'):
             name = os.path.basename(f_path)
             g_name = os.path.splitext(name)[0]

@@ -362,56 +362,62 @@ class TestDiscSiblingFinder:
 class TestRomListing:
     """Tests for list_roms() API response structure."""
 
-    def test_returns_correct_structure(self, rom_dir):
+    @pytest.mark.asyncio
+    async def test_returns_correct_structure(self, rom_dir):
         main.ROM_DIR = rom_dir
         main.ENABLE_DEBUG_MODE = False
-        result = main.list_roms()
+        result = await main.list_roms()
         assert "ps1" in result
         assert "snes" in result
         assert "gba" in result
         assert isinstance(result["ps1"], list)
 
-    def test_lists_zip_files(self, rom_dir):
+    @pytest.mark.asyncio
+    async def test_lists_zip_files(self, rom_dir):
         _create_zip(rom_dir, "Crash.zip")
         _create_zip(rom_dir, "Spyro.zip")
         main.ROM_DIR = rom_dir
         main.ENABLE_DEBUG_MODE = False
-        result = main.list_roms()
+        result = await main.list_roms()
         names = [r["display_name"] for r in result["ps1"]]
         assert "Crash" in names
         assert "Spyro" in names
 
-    def test_deduplicates_multi_disc(self, rom_dir):
+    @pytest.mark.asyncio
+    async def test_deduplicates_multi_disc(self, rom_dir):
         _create_zip(rom_dir, "FF7 (Disc 1).zip")
         _create_zip(rom_dir, "FF7 (Disc 2).zip")
         _create_zip(rom_dir, "FF7 (Disc 3).zip")
         main.ROM_DIR = rom_dir
         main.ENABLE_DEBUG_MODE = False
-        result = main.list_roms()
+        result = await main.list_roms()
         ff7_entries = [r for r in result["ps1"] if "FF7" in r["display_name"]]
         assert len(ff7_entries) == 1
 
-    def test_debug_mode_adds_debug_entry(self, rom_dir):
+    @pytest.mark.asyncio
+    async def test_debug_mode_adds_debug_entry(self, rom_dir):
         main.ROM_DIR = rom_dir
         with patch("main.load_app_config"):
             main.ENABLE_DEBUG_MODE = True
-            result = main.list_roms()
+            result = await main.list_roms()
         debug_entries = [r for r in result["ps1"] if r["filename"] == "DEBUG_MODE_FULL_ACCESS"]
         assert len(debug_entries) == 1
 
-    def test_debug_mode_off_no_debug_entry(self, rom_dir):
+    @pytest.mark.asyncio
+    async def test_debug_mode_off_no_debug_entry(self, rom_dir):
         main.ROM_DIR = rom_dir
         with patch("main.load_app_config"):
             main.ENABLE_DEBUG_MODE = False
-            result = main.list_roms()
+            result = await main.list_roms()
         debug_entries = [r for r in result["ps1"] if r["filename"] == "DEBUG_MODE_FULL_ACCESS"]
         assert len(debug_entries) == 0
 
-    def test_rom_entry_has_required_fields(self, rom_dir):
+    @pytest.mark.asyncio
+    async def test_rom_entry_has_required_fields(self, rom_dir):
         _create_zip(rom_dir, "TestGame.zip")
         main.ROM_DIR = rom_dir
         main.ENABLE_DEBUG_MODE = False
-        result = main.list_roms()
+        result = await main.list_roms()
         entry = result["ps1"][0]
         assert "filename" in entry
         assert "display_name" in entry
@@ -420,19 +426,21 @@ class TestRomListing:
         assert "platform" in entry
         assert entry["platform"] == "ps1"
 
-    def test_snes_rom_listing(self):
+    @pytest.mark.asyncio
+    async def test_snes_rom_listing(self):
         snes_dir = _tmp_dirs["snes"]
         _create_zip(snes_dir, "SuperMario.zip")
         main.SNES_ROM_DIR = snes_dir
-        result = main.list_roms()
+        result = await main.list_roms()
         assert len(result["snes"]) >= 1
         assert result["snes"][0]["platform"] == "snes"
 
-    def test_gba_rom_listing(self):
+    @pytest.mark.asyncio
+    async def test_gba_rom_listing(self):
         gba_dir = _tmp_dirs["gba"]
         _create_zip(gba_dir, "Pokemon.zip")
         main.GBA_ROM_DIR = gba_dir
-        result = main.list_roms()
+        result = await main.list_roms()
         assert len(result["gba"]) >= 1
         assert result["gba"][0]["platform"] == "gba"
 

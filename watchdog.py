@@ -3,6 +3,7 @@ import os
 import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 
 # Load config
 load_dotenv(os.getenv("CONFIG_ENV_PATH", "config.env"))
@@ -26,6 +27,22 @@ def check_activity(container):
         print(f"Error checking activity for {container.name}: {e}")
         return False
 
+def _check_single_container(container):
+    """Worker function: returns (container, is_active, skip_reason) tuple. No dict mutations."""
+    try:
+        created_str = container.attrs['Created'][:19]
+        created_dt = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S")
+        uptime_seconds = (datetime.utcnow() - created_dt).total_seconds()
+        
+        if uptime_seconds < 120:
+            return (container, None, "grace_period")
+        
+        is_active = check_activity(container)
+        return (container, is_active, None)
+    except Exception as e:
+        print(f"Error checking container {container.name}: {e}")
+        return (container, False, None)
+
 def watchdog_loop():
     print("Starting Watchdog Service...")
     while True:
@@ -37,27 +54,22 @@ def watchdog_loop():
             current_time = datetime.now()
             running_ids = set()
 
-            for container in containers:
+            # Check all containers in parallel (each check involves a Docker exec round-trip)
+            with ThreadPoolExecutor(max_workers=min(len(containers), 8) if containers else 1) as executor:
+                results = list(executor.map(_check_single_container, containers))
+
+            # Process results sequentially in main thread (safe dict mutations)
+            for container, is_active, skip_reason in results:
                 running_ids.add(container.id)
 
-                # NEW: Grace period check (Ignore very new containers)
-                # Parse Docker format: 2024-03-21T12:34:56.123456789Z
-                created_str = container.attrs['Created'][:19]
-                created_dt = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S")
-                uptime_seconds = (datetime.utcnow() - created_dt).total_seconds()
-                
-                if uptime_seconds < 120: # 2 minute grace period
+                if skip_reason == "grace_period":
                     continue
 
-                is_active = check_activity(container)
-                
                 if is_active:
-                    # If active, remove from inactivity tracker if present
                     if container.id in inactive_containers:
                         print(f"Container {container.name} is active. Resetting timer.")
                         del inactive_containers[container.id]
                 else:
-                    # If inactive, start tracking or check duration
                     if container.id not in inactive_containers:
                         inactive_containers[container.id] = current_time
                         print(f"Container {container.name} inactive. Timer started.")
@@ -69,16 +81,13 @@ def watchdog_loop():
                             try:
                                 container.remove(force=True)
                                 print(f"Container {container.name} removed.")
-                                # Remove from tracker
                                 del inactive_containers[container.id]
-                                # Also remove from running_ids locally to avoid cleaning up below (redundant but safe)
                                 if container.id in running_ids:
                                     running_ids.remove(container.id)
                             except Exception as e:
                                 print(f"Error removing {container.name}: {e}")
 
-            # Cleanup tracker for containers that are no longer running (e.g. manually stopped)
-            # Use list(inactive_containers.keys()) to avoid modification during iteration
+            # Cleanup tracker for containers that are no longer running
             for cid in list(inactive_containers.keys()):
                 if cid not in running_ids:
                     del inactive_containers[cid]
