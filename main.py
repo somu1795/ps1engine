@@ -100,6 +100,14 @@ def _collect_container_metrics(container):
         elif "waiting" in status_marker: normalized_status = status_marker
         else: normalized_status = status_marker
 
+        if normalized_status in ["stopped", "error"]:
+            logger.info(f"Game exited, container {container.name} status is {normalized_status}. Terminating auto-session.")
+            try:
+                container.remove(force=True)
+                return (session_id, {"status": "stopped", "reason": "Self-terminated after game exit", "metrics": {"container_status": "exited"}})
+            except Exception as e:
+                logger.error(f"Error self-terminating container {container.name}: {e}")
+
         return (session_id, {
             "session_id": session_id,
             "status": normalized_status,
@@ -278,11 +286,7 @@ def verify_paths():
         logger.error("   If this is a network mount, please ensure it is connected before starting.")
         sys.exit(1)
     
-    zips = glob.glob(os.path.join(ROM_DIR, "*.zip"))
-    if not zips and not ENABLE_DEBUG_MODE:
-        logger.error(f"❌ CRITICAL ERROR: ROM_DIR '{ROM_DIR}' is empty (no .zip files found)!")
-        logger.error("   This often happens if a network drive is mounted but currently empty or disconnected.")
-        sys.exit(1)
+    # Removed zip file check as per user request to not fail when a path simply has no zip files
 
     # 2. Check BIOS_DIR (Mandatory populated)
     if not os.path.exists(BIOS_DIR):

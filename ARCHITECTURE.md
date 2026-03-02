@@ -262,7 +262,7 @@ Inside each DuckStation container, the `custom_autostart.sh` script orchestrates
 3. **DuckStation Config** — Generates `settings.ini` from Docker env vars (`RENDERER`, `RESOLUTION_SCALE`, `TEXTURE_FILTERING`, `VSYNC`, `AUDIO_BACKEND`, etc.).
 4. **ROM Handling** — If `ROM_PRECACHED=true`, mounts the pre-extracted directory. Otherwise, unzips the mounted `.zip` in-container.
 5. **PTY Launch** — Uses a Python script with `pty.openpty()` to trick DuckStation into thinking it's in an interactive terminal, preventing headless hangs.
-6. **Lifecycle** — When DuckStation exits, `sudo kill 1` terminates the container's init process, causing auto-cleanup.
+6. **Lifecycle** — When DuckStation exits, the PTY launcher writes `STOPPED` to `/tmp/session_status`. The background heartbeat collector in the Orchestrator detects this state and safely terminates the container via the Docker API.
 
 Status markers written to `/tmp/session_status`:
 `INITIALIZING` → `WAITING_FOR_X` → `WAITING_FOR_WM` → `INITIALIZING` → `RUNNING_GAME` → `STOPPED` or `ERROR`
