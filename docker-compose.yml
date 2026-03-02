@@ -22,6 +22,7 @@ services:
       - ./key.pem:/etc/traefik/certs/key.pem:ro
       - ./traefik_dynamic.yml:/etc/traefik/dynamic/conf.yml:ro
       - ./.credentials:/etc/traefik/.credentials:ro
+    mem_limit: 256m
     networks:
       - emulator-net
     labels:
@@ -86,6 +87,7 @@ services:
       - "traefik.http.routers.orchestrator-admin.tls=true"
       - "traefik.http.routers.orchestrator-admin.middlewares=admin-auth@file"
       - "traefik.http.routers.orchestrator-admin.priority=40"
+    mem_limit: 512m
     networks:
       - emulator-net
     restart: unless-stopped
@@ -102,6 +104,7 @@ services:
       - ./config.env:/app/config.env
     environment:
       - CONFIG_ENV_PATH=/app/config.env
+    mem_limit: 128m
     networks:
       - emulator-net
     restart: unless-stopped
