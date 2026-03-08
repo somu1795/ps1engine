@@ -8,6 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 # Load config
 load_dotenv(os.getenv("CONFIG_ENV_PATH", "config.env"))
 
+# Read infrastructure config from config.env (same values used by main.py)
+NETWORK_NAME = os.getenv("NETWORK_NAME", "emulator-net")
+IMAGE_NAME   = os.getenv("IMAGE_NAME",   "custom-duckstation")
+
 # Initialize Docker client
 client = docker.from_env()
 
@@ -54,12 +58,12 @@ def _check_single_container(container):
         return (container, False, None)
 
 def watchdog_loop():
-    print("Starting Watchdog Service...")
+    print(f"Starting Watchdog Service... (network={NETWORK_NAME}, image={IMAGE_NAME})")
     while True:
         try:
             # Only scan DuckStation containers, not Traefik or other infra
             containers = client.containers.list(
-                filters={"network": "emulator-net", "ancestor": "custom-duckstation"}
+                filters={"network": NETWORK_NAME, "ancestor": IMAGE_NAME}
             )
             current_time = datetime.now(timezone.utc)
             running_ids = set()

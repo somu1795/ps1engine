@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import urllib.parse
 import asyncio
+import random
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ps1engine")
@@ -161,7 +162,7 @@ def _collect_container_metrics(container):
 async def metrics_collector():
     """Background task to update session metrics without blocking the main event loop."""
     logger.info("🚀 Background Metrics Collector Started")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     
     while True:
         try:
@@ -214,7 +215,7 @@ async def metrics_collector():
         except Exception as e:
             logging.error(f"Metrics collection loop error: {e}")
         
-        await asyncio.sleep(4) # Slight increase in sleep to further reduce load
+        await asyncio.sleep(4 + random.uniform(-0.8, 0.8))  # ±20% jitter spreads 40-session reporting spikes
 
 
 @asynccontextmanager
@@ -449,7 +450,7 @@ class StopRequest(BaseModel):
 
 @app.post("/api/start-session")
 async def start_session(request: SessionRequest):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     # 1. Rate Limiting (Prevent spamming the start button)
     if is_rate_limited(request.client_id):
         raise HTTPException(status_code=429, detail="Too many launch requests. Please wait a minute.")
@@ -694,7 +695,7 @@ def get_active_sessions(client_id: str):
 async def stop_session(session_id: str, request: StopRequest):
     client_id = request.client_id
     if not client_id: raise HTTPException(status_code=400, detail="client_id required")
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         container = await loop.run_in_executor(None, lambda: client.containers.get(f"duckstation-{session_id}"))
         if container.labels.get("owner") != client_id:
@@ -750,7 +751,7 @@ def admin_list_sessions():
 
 @app.post("/api/admin/stop-session/{session_id}")
 async def admin_stop_session(session_id: str):
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         container = await loop.run_in_executor(None, lambda: client.containers.get(f"duckstation-{session_id}"))
         await loop.run_in_executor(None, lambda: container.remove(force=True))
@@ -836,7 +837,7 @@ async def get_rom_art(game_id: str):
     
     # Run blocking I/O in executor to avoid blocking the event loop
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, _fetch_cover)
         if result:
             return FileResponse(local_path, headers=cache_headers)
@@ -862,7 +863,7 @@ def get_admin_page():
 @app.get("/api/roms")
 async def list_roms():
     debug_enabled = ENABLE_DEBUG_MODE
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Only glob directories for enabled platforms (avoids I/O on disabled ones)
     glob_futures: dict[str, asyncio.Future] = {}

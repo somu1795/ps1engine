@@ -448,10 +448,10 @@ The test suite uses the `pytest` framework and heavily relies on `unittest.mock`
 
 ## 🔧 Known Technical Debt
 
-| Issue | Location | Details |
-|---|---|---|
-| Watchdog hardcodes network/image names | `watchdog_loop()` | `NETWORK_NAME` and `IMAGE_NAME` from `config.env` are ignored; strings are duplicated in code. |
-| `asyncio.get_event_loop()` deprecation | `start_session()`, `get_rom_art()`, `list_roms()` | Deprecated in Python 3.10+. Should migrate to `asyncio.get_running_loop()` inside async functions. |
-| No `MAX_CONCURRENT_LAUNCHES` | `start_session()` | Mass simultaneous logins can cause CPU/IO spikes during parallel extraction. A task queue (`asyncio.Queue`) would decouple launch requests from extraction workers. |
-| Adaptive jitter missing | `metrics_collector()` | All sessions report simultaneously, creating periodic mini-spikes. Random sleep jitter per session would distribute load. |
-| Persistent save states | `start_session()` | No per-user save directory is mounted. Progress is lost when a session ends. |
+| Status | Issue | Location | Details |
+|---|---|---|---|
+| ✅ Fixed | Watchdog hardcoded network/image names | `watchdog_loop()` | `NETWORK_NAME` and `IMAGE_NAME` now read from `config.env` via `os.getenv()`. |
+| ✅ Fixed | `asyncio.get_event_loop()` deprecation | All async functions | Migrated to `asyncio.get_running_loop()` throughout `main.py`. |
+| ✅ Fixed | Adaptive jitter missing in metrics_collector | `metrics_collector()` | Sleep is now `4 + random.uniform(-0.8, 0.8)` seconds (±20% jitter). |
+| ⬜ Open | No `MAX_CONCURRENT_LAUNCHES` cap | `start_session()` | Mass simultaneous logins can cause CPU/IO spikes during parallel extraction. A task queue (`asyncio.Queue`) would decouple launch requests from extraction workers. Tracked in `TODO.md`. |
+| ⬜ Open | Persistent save states | `start_session()` | No per-user save directory is mounted. Progress is lost when a session ends. Requires a per-user bind mount strategy and UI for save management. |
