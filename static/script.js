@@ -246,10 +246,35 @@ document.addEventListener('DOMContentLoaded', async () => {
                 }
 
                 if (Date.now() - startTime > TIMEOUT_MS) {
-                    throw new Error('Launch timeout. The server might be under heavy load.');
+                    if (!launchAborted) {
+                        alert('Launch timeout. The server might be under heavy load.');
+                        loader.classList.add('hidden');
+                        grid.style.pointerEvents = 'auto';
+                        isLaunching = false;
+                    }
+                    return;
                 }
 
-                const statusRes = await fetch(`/api/session-status/${sessionId}?client_id=${clientId}`);
+                let statusRes;
+                try {
+                    statusRes = await fetch(`/api/session-status/${sessionId}?client_id=${clientId}`);
+                } catch (e) {
+                    // Network errors or transient down
+                    setTimeout(pollStatus, 2000);
+                    return;
+                }
+
+                // If it's a 404 HTTP response, treat it as not found
+                if (statusRes.status === 404) {
+                    if (!launchAborted) {
+                        alert('Emulator session was lost or not found.');
+                        loader.classList.add('hidden');
+                        grid.style.pointerEvents = 'auto';
+                        isLaunching = false;
+                    }
+                    return;
+                }
+
                 const statusData = await statusRes.json();
 
                 if (statusData.status === 'running_game') {
@@ -258,7 +283,12 @@ document.addEventListener('DOMContentLoaded', async () => {
                     grid.style.pointerEvents = 'auto';
                     enterTheater(sessionId, data.url_path, filename);
                 } else if (['error', 'stopped', 'stuck', 'not_found'].includes(statusData.status)) {
-                    throw new Error(statusData.message || 'Emulator failed to initialize');
+                    if (!launchAborted) {
+                        alert(`Launch failed: ${statusData.message || 'Emulator failed to initialize.'}`);
+                        loader.classList.add('hidden');
+                        grid.style.pointerEvents = 'auto';
+                        isLaunching = false;
+                    }
                 } else {
                     // Map internal status to user-friendly milestone
                     const rawStatus = (statusData.status || 'initializing').toLowerCase();
