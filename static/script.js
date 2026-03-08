@@ -194,7 +194,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const loaderStatus = document.getElementById('loader-status');
         const loaderMsg = document.getElementById('loader-message');
         if (loaderStatus) loaderStatus.innerText = 'Initializing System';
-        if (loaderMsg) loaderMsg.innerText = 'Connecting to server...';
+        if (loaderMsg) loaderMsg.innerText = 'Preparing launch...';
 
         grid.style.pointerEvents = 'none';
 
@@ -232,10 +232,10 @@ document.addEventListener('DOMContentLoaded', async () => {
             const TIMEOUT_MS = 90000; // 90 seconds max
 
             const MILESTONES = {
+                'extracting_rom': 'Unpacking game files...',
                 'initializing': 'Preparing system components...',
                 'waiting_for_x': 'Setting up graphics engine...',
                 'waiting_for_wm': 'Handshaking with window manager...',
-                'extracting': 'Unpacking game files...',
                 'running_game': 'Starting game theater...'
             };
 

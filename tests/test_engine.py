@@ -573,9 +573,10 @@ class TestContainerEnvInjection:
             assert os.getenv("STREAM_FRAMERATE", "30") == "60"
 
     def test_security_hardening_vars_present(self):
-        """Verify all 11 security hardening vars are defined in start_session code."""
+        """Verify all 11 security hardening vars are defined in the background launch function."""
         import inspect
-        source = inspect.getsource(main.start_session)
+        # Security vars are now in _launch_ps1_session (the background task), not start_session()
+        source = inspect.getsource(main._launch_ps1_session)
         required = [
             "HARDEN_DESKTOP", "DISABLE_OPEN_TOOLS", "DISABLE_SUDO",
             "DISABLE_TERMINALS", "DISABLE_CLOSE_BUTTON", "DISABLE_MOUSE_BUTTONS",
@@ -875,11 +876,19 @@ class TestPS1SessionE2E:
         )
         result = await main.start_session(request)
 
+        # start_session() returns immediately and schedules _launch_ps1_session as a task.
+        # Collect and await all pending tasks so containers.run() gets called.
+        pending = [t for t in asyncio.all_tasks() if not t.done() and t != asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
         assert "session_id" in result
         assert result["url_path"].startswith("/")
         assert "password" in result
 
+        assert main.client.containers.run.called, "Background task did not call containers.run"
         call_kwargs = main.client.containers.run.call_args[1]
+
         env = call_kwargs["environment"]
         required_security = [
             "HARDEN_DESKTOP", "DISABLE_OPEN_TOOLS", "DISABLE_SUDO",

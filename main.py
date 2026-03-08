@@ -509,7 +509,7 @@ async def start_session(request: SessionRequest):
 
     session_id = str(uuid.uuid4())[:8]
 
-    # Universal Enforce 1: If it's a WASM platform, immediately return static route after killing container
+    # Universal Enforce 1: If it's a WASM platform, immediately return static route
     if request.platform != "ps1":
         logger.info(f"Creating WASM session for {request.platform}: {request.game_filename}")
         encoded_rom = urllib.parse.quote(request.game_filename)
@@ -521,119 +521,139 @@ async def start_session(request: SessionRequest):
             "platform": request.platform
         }
 
-    logger.info(f"Creating new Docker session {session_id} for game {request.game_filename}")
-    password = secrets.token_urlsafe(8)
-    mounts = []
-    scale = int(os.getenv("RESOLUTION_SCALE", "1"))
-    stream_quality = int(os.getenv("STREAM_QUALITY", "50"))
-    h264_crf = 50 - int((stream_quality / 100) * 45)  # quality 1-100 → CRF 50-5 (lower CRF = better)
-    if scale <= 1:
-        renderer, filtering, pgxp_geo, pgxp_tex, true_color, display_w, display_h = "Software", "0", "false", "false", "false", 1024, 768
-    elif scale == 2:
-        renderer, filtering, pgxp_geo, pgxp_tex, true_color, display_w, display_h = "Vulkan", "1", "true", "true", "true", 1024, 768
-    else:
-        renderer, filtering, pgxp_geo, pgxp_tex, true_color, display_w, display_h = "Vulkan", "3", "true", "true", "true", 1280, 1024
-
-    logger.debug(f"Preparing container config for session {session_id}")
-    env_vars = {
-        "VNC_PW": password, "PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC", "LIBGL_ALWAYS_SOFTWARE": "1",
-        "RENDERER": renderer, "RESOLUTION_SCALE": str(scale), "TEXTURE_FILTERING": filtering, "TRUE_COLOR": true_color,
-        "PGXP_GEOMETRY": pgxp_geo, "PGXP_TEXTURE": pgxp_tex, "VSYNC": "false", "AUDIO_BACKEND": os.getenv("AUDIO_BACKEND", "Cubeb"),
-        "SELKIES_MANUAL_WIDTH": str(display_w), "SELKIES_MANUAL_HEIGHT": str(display_h),
-        "MAX_RES": f"{display_w}x{display_h}",
-        "SELKIES_VIDEO_BITRATE": os.getenv("STREAM_BITRATE", "2000"), "SELKIES_VIDEO_FRAMERATE": os.getenv("STREAM_FRAMERATE", "30"),
-        "SELKIES_H264_CRF": str(h264_crf),
-        "SELKIES_AUDIO_BITRATE": "320000",
-        "SHOW_FPS": os.getenv("SHOW_FPS", "false"),
-        "GAME_NAME": _identify_disc_set(request.game_filename).replace(".zip", "").replace(".ZIP", ""),
-        # Security & Hardening Overrides
-        "HARDEN_DESKTOP": "true", "DISABLE_OPEN_TOOLS": "true", "DISABLE_SUDO": "true", 
-        "DISABLE_TERMINALS": "true", "DISABLE_CLOSE_BUTTON": "true", "DISABLE_MOUSE_BUTTONS": "true",
-        "HARDEN_KEYBINDS": "true", "SELKIES_COMMAND_ENABLED": "False", 
-        "SELKIES_UI_SIDEBAR_SHOW_FILES": "False", "SELKIES_UI_SIDEBAR_SHOW_APPS": "False",
-        "SELKIES_FILE_TRANSFERS": ""
-    }
-
-
-    if request.game_filename == "DEBUG_MODE_FULL_ACCESS":
-        if not ENABLE_DEBUG_MODE: raise HTTPException(status_code=403, detail="Debug Mode disabled")
-        mounts.append(docker.types.Mount(target="/roms", source=HOST_ROM_DIR, type="bind", read_only=True))
-        env_vars["GAME_ROM"] = ""
-    else:
+    # --- PS1 Docker path ---
+    # Validate filename BEFORE returning, so obvious errors are caught synchronously.
+    if request.game_filename != "DEBUG_MODE_FULL_ACCESS":
         if not request.game_filename.lower().endswith(".zip"):
             raise HTTPException(status_code=400, detail="Only .zip supported")
         safe_name = os.path.basename(request.game_filename)
         if safe_name != request.game_filename or ".." in request.game_filename:
             raise HTTPException(status_code=400, detail="Invalid filename: path traversal detected")
+        if not os.path.exists(os.path.join(ROM_DIR, request.game_filename)):
+            raise HTTPException(status_code=404, detail=f"ROM not found: {request.game_filename}")
 
-        # --- Smart Multi-Disc Detection & Extraction ---
-        disc_siblings = await loop.run_in_executor(None, find_disc_siblings, request.game_filename)
-        
-        # Use simple global lock to prevent race conditions during extraction and startup
-        cache_key = _safe_cache_key(_identify_disc_set(disc_siblings[0]))
-        lock_file_path = os.path.join(ROM_CACHE_DIR, f"{cache_key}.lock")
-        os.makedirs(ROM_CACHE_DIR, exist_ok=True)
+    password = secrets.token_urlsafe(8)
 
-        # Signal extraction progress immediately so the polling client sees feedback
-        metrics_cache[session_id] = {"session_id": session_id, "status": "extracting_rom", "message": "Extracting ROM to cache..."}
+    # Seed metrics_cache immediately so polling sees 'extracting_rom' before the task runs.
+    metrics_cache[session_id] = {
+        "session_id": session_id,
+        "status": "extracting_rom",
+        "message": "Unpacking game files..."
+    }
 
-        with open(lock_file_path, 'w') as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-            try:
-                # RE-CHECK: Now that we have the lock, check if another thread already started the container
-                if request.client_id:
-                    existing = await loop.run_in_executor(None, lambda: client.containers.list(filters={"label": f"owner={request.client_id}"}))
-                    if existing:
-                        c = existing[0]
-                        env = c.attrs['Config']['Env']
-                        vnc_pw = next((s for s in env if s.startswith("VNC_PW=")), "").split("=", 1)[1]
-                        return {"session_id": c.name.replace("duckstation-", ""), "url_path": f"/{c.name.replace('duckstation-', '')}/", "username": "player", "password": vnc_pw}
+    # Launch heavy work (extraction + Docker run) as a background task.
+    # start_session() returns immediately — the client polls /api/session-status.
+    asyncio.create_task(_launch_ps1_session(request, session_id, password, loop))
 
-                cached_dir = await loop.run_in_executor(None, get_or_extract_rom_set, disc_siblings)
-            finally:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
-        
-        if cached_dir:
-            host_cached_dir = os.path.join(HOST_CACHE_DIR, cache_key)
-            mounts.append(docker.types.Mount(target="/roms", source=host_cached_dir, type="bind", read_only=True))
-            
-            # Find all cues in the set
-            cues = glob.glob(os.path.join(cached_dir, "**/*.cue"), recursive=True)
-            cues.sort() # Disc 1 should come first
-            
-            if len(cues) > 1:
-                # Generate M3U playlist for live disc swapping
-                m3u_path = os.path.join(cached_dir, "playlist.m3u")
-                with open(m3u_path, "w") as f:
-                    for cue in cues:
-                        f.write(os.path.relpath(cue, cached_dir) + "\n")
-                
-                env_vars["GAME_ROM"] = "/roms/playlist.m3u"
-                env_vars["ROM_PRECACHED"] = "true"
-                logger.info(f"Multi-disc set detected: {len(cues)} discs bound via playlist.m3u")
-            elif cues:
-                env_vars["GAME_ROM"] = f"/roms/{os.path.relpath(cues[0], cached_dir)}"
-                env_vars["ROM_PRECACHED"] = "true"
-            else:
-                # Fallback to iso or bin if no cue
-                other = glob.glob(os.path.join(cached_dir, "**/*.iso"), recursive=True) or glob.glob(os.path.join(cached_dir, "**/*.bin"), recursive=True)
-                if other:
-                    env_vars["GAME_ROM"] = f"/roms/{os.path.relpath(other[0], cached_dir)}"
-                    env_vars["ROM_PRECACHED"] = "true"
-                else: env_vars["GAME_ROM"] = ""
-        else:
-            host_rom_path = os.path.join(HOST_ROM_DIR, request.game_filename)
-            mounts.append(docker.types.Mount(target="/roms/game.zip", source=host_rom_path, type="bind", read_only=True))
-            env_vars["GAME_ROM"] = "/roms/game.zip"
+    logger.info(f"Queued background launch for session {session_id} ({request.game_filename})")
+    return {
+        "session_id": session_id,
+        "url_path": f"/{session_id}/",
+        "username": "player",
+        "password": password
+    }
 
-    mounts.extend([
-        docker.types.Mount(target="/config/.local/share/duckstation/bios", source=HOST_BIOS_DIR, type="bind", read_only=True),
-        docker.types.Mount(target="/dev/uinput", source="/dev/uinput", type="bind", read_only=False)
-    ])
+
+async def _launch_ps1_session(request: SessionRequest, session_id: str, password: str, loop):
+    """Background task: extract ROM and spawn Docker container.
     
+    Updates metrics_cache with status at each stage so the frontend receives
+    live progress via /api/session-status polling.
+    """
+    def _set_status(status: str, message: str):
+        metrics_cache[session_id] = {"session_id": session_id, "status": status, "message": message}
+
     try:
+        scale = int(os.getenv("RESOLUTION_SCALE", "1"))
+        stream_quality = int(os.getenv("STREAM_QUALITY", "50"))
+        h264_crf = 50 - int((stream_quality / 100) * 45)
+        if scale <= 1:
+            renderer, filtering, pgxp_geo, pgxp_tex, true_color, display_w, display_h = "Software", "0", "false", "false", "false", 1024, 768
+        elif scale == 2:
+            renderer, filtering, pgxp_geo, pgxp_tex, true_color, display_w, display_h = "Vulkan", "1", "true", "true", "true", 1024, 768
+        else:
+            renderer, filtering, pgxp_geo, pgxp_tex, true_color, display_w, display_h = "Vulkan", "3", "true", "true", "true", 1280, 1024
+
+        env_vars = {
+            "VNC_PW": password, "PUID": "1000", "PGID": "1000", "TZ": "Etc/UTC", "LIBGL_ALWAYS_SOFTWARE": "1",
+            "RENDERER": renderer, "RESOLUTION_SCALE": str(scale), "TEXTURE_FILTERING": filtering, "TRUE_COLOR": true_color,
+            "PGXP_GEOMETRY": pgxp_geo, "PGXP_TEXTURE": pgxp_tex, "VSYNC": "false", "AUDIO_BACKEND": os.getenv("AUDIO_BACKEND", "Cubeb"),
+            "SELKIES_MANUAL_WIDTH": str(display_w), "SELKIES_MANUAL_HEIGHT": str(display_h),
+            "MAX_RES": f"{display_w}x{display_h}",
+            "SELKIES_VIDEO_BITRATE": os.getenv("STREAM_BITRATE", "2000"), "SELKIES_VIDEO_FRAMERATE": os.getenv("STREAM_FRAMERATE", "30"),
+            "SELKIES_H264_CRF": str(h264_crf), "SELKIES_AUDIO_BITRATE": "320000",
+            "SHOW_FPS": os.getenv("SHOW_FPS", "false"),
+            "GAME_NAME": _identify_disc_set(request.game_filename).replace(".zip", "").replace(".ZIP", ""),
+            "HARDEN_DESKTOP": "true", "DISABLE_OPEN_TOOLS": "true", "DISABLE_SUDO": "true",
+            "DISABLE_TERMINALS": "true", "DISABLE_CLOSE_BUTTON": "true", "DISABLE_MOUSE_BUTTONS": "true",
+            "HARDEN_KEYBINDS": "true", "SELKIES_COMMAND_ENABLED": "False",
+            "SELKIES_UI_SIDEBAR_SHOW_FILES": "False", "SELKIES_UI_SIDEBAR_SHOW_APPS": "False",
+            "SELKIES_FILE_TRANSFERS": ""
+        }
+
+        mounts = []
+
+        if request.game_filename == "DEBUG_MODE_FULL_ACCESS":
+            if not ENABLE_DEBUG_MODE:
+                _set_status("error", "Debug Mode disabled")
+                return
+            mounts.append(docker.types.Mount(target="/roms", source=HOST_ROM_DIR, type="bind", read_only=True))
+            env_vars["GAME_ROM"] = ""
+        else:
+            # --- Multi-Disc Detection & Extraction ---
+            disc_siblings = await loop.run_in_executor(None, find_disc_siblings, request.game_filename)
+            cache_key = _safe_cache_key(_identify_disc_set(disc_siblings[0]))
+            lock_file_path = os.path.join(ROM_CACHE_DIR, f"{cache_key}.lock")
+            os.makedirs(ROM_CACHE_DIR, exist_ok=True)
+
+            _set_status("extracting_rom", "Unpacking game files...")
+
+            with open(lock_file_path, 'w') as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                try:
+                    # RE-CHECK after lock: another concurrent task may have already launched this game
+                    if request.client_id:
+                        existing = await loop.run_in_executor(None, lambda: client.containers.list(filters={"label": f"owner={request.client_id}"}))
+                        if existing:
+                            logger.info(f"Post-lock: container already started for {request.client_id}. Aborting duplicate.")
+                            metrics_cache.pop(session_id, None)
+                            return
+                    cached_dir = await loop.run_in_executor(None, get_or_extract_rom_set, disc_siblings)
+                finally:
+                    fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+            if cached_dir:
+                host_cached_dir = os.path.join(HOST_CACHE_DIR, cache_key)
+                mounts.append(docker.types.Mount(target="/roms", source=host_cached_dir, type="bind", read_only=True))
+                cues = sorted(glob.glob(os.path.join(cached_dir, "**/*.cue"), recursive=True))
+                if len(cues) > 1:
+                    m3u_path = os.path.join(cached_dir, "playlist.m3u")
+                    with open(m3u_path, "w") as f:
+                        for cue in cues: f.write(os.path.relpath(cue, cached_dir) + "\n")
+                    env_vars["GAME_ROM"] = "/roms/playlist.m3u"
+                    env_vars["ROM_PRECACHED"] = "true"
+                elif cues:
+                    env_vars["GAME_ROM"] = f"/roms/{os.path.relpath(cues[0], cached_dir)}"
+                    env_vars["ROM_PRECACHED"] = "true"
+                else:
+                    other = (glob.glob(os.path.join(cached_dir, "**/*.iso"), recursive=True) or
+                             glob.glob(os.path.join(cached_dir, "**/*.bin"), recursive=True))
+                    env_vars["GAME_ROM"] = f"/roms/{os.path.relpath(other[0], cached_dir)}" if other else ""
+                    if other: env_vars["ROM_PRECACHED"] = "true"
+            else:
+                host_rom_path = os.path.join(HOST_ROM_DIR, request.game_filename)
+                mounts.append(docker.types.Mount(target="/roms/game.zip", source=host_rom_path, type="bind", read_only=True))
+                env_vars["GAME_ROM"] = "/roms/game.zip"
+
+        mounts.extend([
+            docker.types.Mount(target="/config/.local/share/duckstation/bios", source=HOST_BIOS_DIR, type="bind", read_only=True),
+            docker.types.Mount(target="/dev/uinput", source="/dev/uinput", type="bind", read_only=False)
+        ])
+
+        _set_status("initializing", "Booting emulator container...")
+
         def _run_container():
-            logger.info(f"Triggering docker run for {session_id}")
+            logger.info(f"Triggering docker run for session {session_id}")
             c = client.containers.run(
                 image=IMAGE_NAME, detach=True, network=NETWORK_NAME, name=f"duckstation-{session_id}",
                 extra_hosts={"api.github.com": "0.0.0.0", "github.com": "0.0.0.0"},
@@ -651,18 +671,35 @@ async def start_session(request: SessionRequest):
                 },
                 devices=["/dev/uinput:/dev/uinput:rwm", "/dev/dri:/dev/dri:rwm"] if os.path.exists("/dev/dri") else ["/dev/uinput:/dev/uinput:rwm"]
             )
-            logger.info(f"Container created successfully: {c.id[:12]}")
+            logger.info(f"Container created: {c.id[:12]}")
             return c
-        
-        container = await loop.run_in_executor(None, _run_container)
-        return {"session_id": session_id, "url_path": f"/{session_id}/", "username": "player", "password": password}
+
+        await loop.run_in_executor(None, _run_container)
+        # Container is up — metrics_collector will update status to 'running_game' within ~4s
+        logger.info(f"Background launch complete for session {session_id}")
+
     except Exception as e:
-        logging.error(f"FATAL start_session error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Background launch FAILED for session {session_id}: {e}", exc_info=True)
+        _set_status("error", f"Failed to start session: {e}")
 
 @app.get("/api/session-status/{session_id}")
 def get_session_status(session_id: str, client_id: str):
     try:
+        # Check metrics_cache first — covers the pre-container 'extracting_rom'/'initializing' phase
+        # where the container doesn't exist yet but the background task is running.
+        if session_id in metrics_cache:
+            cached = metrics_cache[session_id]
+            # If the task reported an error before the container was created, return it directly
+            if cached.get("status") == "error":
+                return cached
+            # If still in pre-container phase (extracting/initializing before Docker run)
+            if cached.get("status") in ("extracting_rom", "initializing") and cached.get("message"):
+                # Try to confirm the container exists; if not, return the cached status
+                try:
+                    container = client.containers.get(f"duckstation-{session_id}")
+                except docker.errors.NotFound:
+                    return cached  # Container not yet created — background task still running
+
         container = client.containers.get(f"duckstation-{session_id}")
         if container.labels.get("owner") != client_id:
             raise HTTPException(status_code=403, detail="Forbidden: You do not own this session")
@@ -670,6 +707,9 @@ def get_session_status(session_id: str, client_id: str):
         if session_id in metrics_cache: return metrics_cache[session_id]
         return {"session_id": session_id, "status": "initializing", "message": "Collecting metrics..."}
     except docker.errors.NotFound:
+        # If we have a cache entry this session is still launching; if not, it's truly gone
+        if session_id in metrics_cache:
+            return metrics_cache[session_id]
         return {"session_id": session_id, "status": "not_found"}
     except HTTPException: raise
     except Exception as e:
