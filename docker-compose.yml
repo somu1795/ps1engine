@@ -90,7 +90,7 @@ services:
     cpus: 1.0
     mem_limit: 512m
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/roms > /dev/null || exit 1"]
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/roms', timeout=5)\" || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
