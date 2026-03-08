@@ -27,7 +27,7 @@ services:
       - emulator-net
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik-dashboard.rule=(Host(`${DOMAIN_LOCAL}`) || Host(`${DOMAIN_REMOTE}`)) && (PathPrefix(`/dashboard`) || PathPrefix(`/api`))"
+      - "traefik.http.routers.traefik-dashboard.rule=(Host(`${DOMAIN_LOCAL}`) || Host(`${DOMAIN_REMOTE}`)) && PathPrefix(`/dashboard`)"
       - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
       - "traefik.http.routers.traefik-dashboard.tls=true"
       - "traefik.http.routers.traefik-dashboard.service=api@internal"
