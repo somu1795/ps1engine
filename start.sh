@@ -23,6 +23,12 @@ if [ ! -f "config.env" ]; then
     fi
 fi
 
+echo "🔍 Validating docker-compose.yml..."
+if ! docker compose config --quiet 2>/dev/null; then
+    echo "❌ docker-compose.yml has errors. Run 'docker compose config' for details."
+    exit 1
+fi
+
 # 1. Build the custom DuckStation image
 echo "📦 Building custom DuckStation image (version: ${DUCKSTATION_VERSION:-latest})..."
 docker build \
@@ -71,4 +77,13 @@ echo "   - Traefik Dash:  https://${DOMAIN_REMOTE:-your-domain.com}/dashboard/"
 echo ""
 echo "   To stop services, run: ./stop.sh"
 echo "   To view logs, run: docker-compose logs -f"
+echo ""
+
+# Run smoke test to verify the stack is healthy
+if [ -f "./smoke_test.sh" ]; then
+    chmod +x ./smoke_test.sh
+    echo "🧪 Running smoke test (waiting 30s for services to stabilize)..."
+    sleep 30
+    ./smoke_test.sh || echo "⚠️  Smoke test had failures — check logs above."
+fi
 
