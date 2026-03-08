@@ -48,11 +48,11 @@ mkdir -p /config/.config/duckstation
 
 echo "[$(date)] Applying Config: Renderer=${RENDERER}, Scale=${RESOLUTION_SCALE}, Filter=${TEXTURE_FILTERING}, VSync=${VSYNC}" >> /config/autostart.log
 
-# Determine Game List Path based on Mode
-# If GAME_ROM is set (Isolated Mode), point to temp extraction dir
-# If not set (Debug Mode), point to full library mount
+# Determine Game List Path before writing settings.ini.
+# Pre-cached ROMs are already extracted on the host and bind-mounted to /roms.
+# Only non-cached ZIPs require in-container extraction to /tmp/game.
 GAME_LIST_PATH="/roms"
-if [ -n "$GAME_ROM" ]; then
+if [ -n "$GAME_ROM" ] && [ "${ROM_PRECACHED}" != "true" ]; then
     GAME_LIST_PATH="/tmp/game"
 fi
 
@@ -91,8 +91,8 @@ Backend = ${AUDIO_BACKEND}
 ShowFPS = ${SHOW_FPS}
 
 [Logging]
-LogLevel = Debug
-LogToConsole = true
+LogLevel = ${DUCKSTATION_LOG_LEVEL:-Warning}
+LogToConsole = false
 LogToFile = true
 
 [InputSources]
@@ -300,8 +300,7 @@ echo "Starting Python PTY launcher via nohup..." >> /config/autostart.log
     else
         python3 /defaults/launch_duck.py >> /config/autostart.log 2>&1
     fi
-    echo "[$(date)] DuckStation stopped, killing container..." >> /config/autostart.log
-    sudo kill 1
+    echo "[$(date)] DuckStation process exited. Orchestrator heartbeat will handle container cleanup." >> /config/autostart.log
 ) &
 
 exit 0

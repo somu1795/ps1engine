@@ -355,7 +355,8 @@ The `/api/roms` endpoint runs `glob.glob()` for PS1, SNES, and GBA directories i
 ### Authentication
 - **Method**: Traefik Basic Auth middleware via `.credentials` file.
 - **Format**: `{SHA}` hashed password.
-- **Generate**: `python3 -c "import hashlib, base64; print('admin:{SHA}' + base64.b64encode(hashlib.sha1('NEW_PASSWORD'.encode()).digest()).decode())" > .credentials`
+- **Generate**: `htpasswd -nbB admin NEW_PASSWORD > .credentials` *(requires `apache2-utils`: `sudo apt install apache2-utils`)*
+  - Alternative (no system deps): `python3 -c "import bcrypt; print('admin:' + bcrypt.hashpw(b'NEW_PASSWORD', bcrypt.gensalt()).decode())" > .credentials` *(requires `pip install bcrypt`)*
 - **Apply**: Restart traefik and orchestrator after changing.
 
 ### Dashboard Capabilities

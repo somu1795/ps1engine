@@ -1,7 +1,7 @@
 import docker
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 
@@ -16,13 +16,23 @@ inactive_containers = {}
 
 def check_activity(container):
     """
-    Checks if there are active connections on port 3000 inside the container.
-    Returns True if active, False otherwise.
+    Checks if the session is active. Uses two signals:
+    1. Established TCP connections on port 3000 (Selkies signalling).
+    2. /tmp/session_status == RUNNING_GAME (covers UDP-only WebRTC streams where
+       no TCP ESTAB connection exists but the emulator is actively streaming).
+    Returns True if either signal indicates activity.
     """
     try:
-        # Use ss (always available) instead of netstat
-        exit_code, output = container.exec_run("sh -c 'ss -tan | grep :3000 | grep ESTAB'")
-        return exit_code == 0
+        # Signal 1: TCP connections on the Selkies signalling port
+        exit_code, _ = container.exec_run("sh -c 'ss -tan | grep :3000 | grep ESTAB'")
+        if exit_code == 0:
+            return True
+        # Signal 2: Session status file written by launch_duck.py
+        exit_code2, output2 = container.exec_run("sh -c 'cat /tmp/session_status 2>/dev/null'")
+        if exit_code2 == 0 and output2:
+            status = output2.decode("utf-8", errors="replace").strip()
+            return status == "RUNNING_GAME"
+        return False
     except Exception as e:
         print(f"Error checking activity for {container.name}: {e}")
         return False
@@ -31,8 +41,8 @@ def _check_single_container(container):
     """Worker function: returns (container, is_active, skip_reason) tuple. No dict mutations."""
     try:
         created_str = container.attrs['Created'][:19]
-        created_dt = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S")
-        uptime_seconds = (datetime.utcnow() - created_dt).total_seconds()
+        created_dt = datetime.strptime(created_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        uptime_seconds = (datetime.now(timezone.utc) - created_dt).total_seconds()
         
         if uptime_seconds < 120:
             return (container, None, "grace_period")
@@ -51,7 +61,7 @@ def watchdog_loop():
             containers = client.containers.list(
                 filters={"network": "emulator-net", "ancestor": "custom-duckstation"}
             )
-            current_time = datetime.now()
+            current_time = datetime.now(timezone.utc)
             running_ids = set()
 
             # Check all containers in parallel (each check involves a Docker exec round-trip)

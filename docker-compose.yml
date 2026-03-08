@@ -87,7 +87,14 @@ services:
       - "traefik.http.routers.orchestrator-admin.tls=true"
       - "traefik.http.routers.orchestrator-admin.middlewares=admin-auth@file"
       - "traefik.http.routers.orchestrator-admin.priority=40"
+    cpus: 1.0
     mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/roms > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     networks:
       - emulator-net
     restart: unless-stopped

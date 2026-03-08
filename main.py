@@ -358,8 +358,16 @@ def get_or_extract_rom_set(filenames: list[str]) -> str | None:
 
     try:
         if os.path.isfile(done_marker):
-             # Integrity check: complex for multi-zip. For now, assume marker is enough if files exist.
-             if os.path.exists(cache_dir): return cache_dir
+            # Integrity check: verify at least one game file exists, not just the marker.
+            game_files = (
+                glob.glob(os.path.join(cache_dir, "**/*.cue"), recursive=True) +
+                glob.glob(os.path.join(cache_dir, "**/*.iso"), recursive=True) +
+                glob.glob(os.path.join(cache_dir, "**/*.bin"), recursive=True)
+            )
+            if game_files:
+                return cache_dir
+            logger.warning(f"Cache dir {cache_dir} has marker but no game files. Re-extracting.")
+            os.remove(done_marker)
         
         shutil.rmtree(cache_dir, ignore_errors=True)
         os.makedirs(cache_dir, exist_ok=True)
@@ -498,16 +506,23 @@ async def start_session(request: SessionRequest):
         mounts.append(docker.types.Mount(target="/roms", source=HOST_ROM_DIR, type="bind", read_only=True))
         env_vars["GAME_ROM"] = ""
     else:
-        if not request.game_filename.lower().endswith(".zip"): raise HTTPException(status_code=400, detail="Only .zip supported")
-        
+        if not request.game_filename.lower().endswith(".zip"):
+            raise HTTPException(status_code=400, detail="Only .zip supported")
+        safe_name = os.path.basename(request.game_filename)
+        if safe_name != request.game_filename or ".." in request.game_filename:
+            raise HTTPException(status_code=400, detail="Invalid filename: path traversal detected")
+
         # --- Smart Multi-Disc Detection & Extraction ---
-        disc_siblings = find_disc_siblings(request.game_filename)
+        disc_siblings = await loop.run_in_executor(None, find_disc_siblings, request.game_filename)
         
         # Use simple global lock to prevent race conditions during extraction and startup
         cache_key = _safe_cache_key(_identify_disc_set(disc_siblings[0]))
         lock_file_path = os.path.join(ROM_CACHE_DIR, f"{cache_key}.lock")
         os.makedirs(ROM_CACHE_DIR, exist_ok=True)
-        
+
+        # Signal extraction progress immediately so the polling client sees feedback
+        metrics_cache[session_id] = {"session_id": session_id, "status": "extracting_rom", "message": "Extracting ROM to cache..."}
+
         with open(lock_file_path, 'w') as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             try:
@@ -623,21 +638,22 @@ def get_active_sessions(client_id: str):
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/stop-session/{session_id}")
-def stop_session(session_id: str, request: StopRequest):
+async def stop_session(session_id: str, request: StopRequest):
     client_id = request.client_id
     if not client_id: raise HTTPException(status_code=400, detail="client_id required")
+    loop = asyncio.get_event_loop()
     try:
-        container = client.containers.get(f"duckstation-{session_id}")
+        container = await loop.run_in_executor(None, lambda: client.containers.get(f"duckstation-{session_id}"))
         if container.labels.get("owner") != client_id:
             raise HTTPException(status_code=403, detail="Forbidden: You do not own this session")
-        
-        container.remove(force=True)
-        
-        # Wait for actual removal
+
+        await loop.run_in_executor(None, lambda: container.remove(force=True))
+
+        # Wait for actual removal without blocking the event loop
         for _ in range(10):
             try:
-                client.containers.get(f"duckstation-{session_id}")
-                time.sleep(0.5)
+                await loop.run_in_executor(None, lambda: client.containers.get(f"duckstation-{session_id}"))
+                await asyncio.sleep(0.5)
             except docker.errors.NotFound:
                 break
         return {"status": "success"}
@@ -645,7 +661,7 @@ def stop_session(session_id: str, request: StopRequest):
         return {"status": "already_gone"}
     except HTTPException:
         raise
-    except Exception as e: 
+    except Exception as e:
         logging.error(f"FATAL stop_session error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -680,15 +696,16 @@ def admin_list_sessions():
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/admin/stop-session/{session_id}")
-def admin_stop_session(session_id: str):
+async def admin_stop_session(session_id: str):
+    loop = asyncio.get_event_loop()
     try:
-        container = client.containers.get(f"duckstation-{session_id}")
-        container.remove(force=True)
-        # Wait for removal
+        container = await loop.run_in_executor(None, lambda: client.containers.get(f"duckstation-{session_id}"))
+        await loop.run_in_executor(None, lambda: container.remove(force=True))
+        # Wait for removal without blocking
         for _ in range(10):
             try:
-                client.containers.get(f"duckstation-{session_id}")
-                time.sleep(0.5)
+                await loop.run_in_executor(None, lambda: client.containers.get(f"duckstation-{session_id}"))
+                await asyncio.sleep(0.5)
             except docker.errors.NotFound:
                 break
         return {"status": "success"}
@@ -791,7 +808,6 @@ def get_admin_page():
 
 @app.get("/api/roms")
 async def list_roms():
-    load_app_config()
     debug_enabled = ENABLE_DEBUG_MODE
     loop = asyncio.get_event_loop()
     

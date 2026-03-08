@@ -25,7 +25,7 @@ fi
 
 # 1. Build the custom DuckStation image
 echo "📦 Building custom DuckStation image (No Cache)..."
-docker build --no-cache -t custom-duckstation -f Dockerfile.duckstation .
+docker build -t custom-duckstation -f Dockerfile.duckstation .
 
 if [ $? -ne 0 ]; then
     echo "❌ DuckStation build failed."
@@ -34,7 +34,10 @@ fi
 
 # Load environment variables from .env if it exists
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
 fi
 
 # 2. Build and Start Infrastructure
@@ -61,7 +64,7 @@ echo ""
 echo "🎉 System is running!"
 echo "   - Remote domain: https://${DOMAIN_REMOTE:-your-domain.com}"
 echo "   - Local domain:  https://${DOMAIN_LOCAL:-localhost}"
-echo "   - Traefik Dash:  http://localhost:8080"
+echo "   - Traefik Dash:  https://${DOMAIN_REMOTE:-your-domain.com}/dashboard/"
 echo ""
 echo "   To stop services, run: ./stop.sh"
 echo "   To view logs, run: docker-compose logs -f"

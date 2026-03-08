@@ -17,7 +17,7 @@ import zipfile
 import asyncio
 from unittest.mock import patch, MagicMock, PropertyMock, mock_open
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -76,6 +76,17 @@ import main
 
 _mock_docker_patcher.stop()
 
+# ---------------------------------------------------------------------------
+# Also import watchdog under a Docker mock so we can test its functions
+# ---------------------------------------------------------------------------
+_mock_watchdog_patcher = patch("docker.from_env")
+_mock_watchdog_docker = _mock_watchdog_patcher.start()
+_mock_watchdog_docker.return_value = MagicMock()
+
+import watchdog as watchdog_module
+
+_mock_watchdog_patcher.stop()
+
 
 def _cleanup_tmp():
     for d in _tmp_dirs.values():
@@ -96,21 +107,36 @@ def reset_globals():
 
 
 @pytest.fixture
-def rom_dir():
-    """Return the temp ROM directory path."""
-    return _tmp_dirs["rom"]
+def rom_dir(tmp_path):
+    """Return a fresh, isolated ROM directory per test."""
+    d = tmp_path / "roms"
+    d.mkdir()
+    prev = main.ROM_DIR
+    main.ROM_DIR = str(d)
+    yield str(d)
+    main.ROM_DIR = prev
 
 
 @pytest.fixture
-def cache_dir():
-    """Return the temp cache directory path."""
-    return _tmp_dirs["cache"]
+def cache_dir(tmp_path):
+    """Return a fresh, isolated cache directory per test."""
+    d = tmp_path / "cache"
+    d.mkdir()
+    prev = main.ROM_CACHE_DIR
+    main.ROM_CACHE_DIR = str(d)
+    yield str(d)
+    main.ROM_CACHE_DIR = prev
 
 
 @pytest.fixture
-def covers_dir():
-    """Return the temp covers directory path."""
-    return _tmp_dirs["covers"]
+def covers_dir(tmp_path):
+    """Return a fresh, isolated covers directory per test."""
+    d = tmp_path / "covers"
+    d.mkdir()
+    prev = main.COVERS_DIR
+    main.COVERS_DIR = str(d)
+    yield str(d)
+    main.COVERS_DIR = prev
 
 
 def _create_zip(directory, name, contents=None):
@@ -612,17 +638,19 @@ class TestSessionStatusAPI:
 class TestStopSessionAPI:
     """Tests for stop_session() endpoint logic."""
 
-    def test_owner_can_stop(self):
+    @pytest.mark.asyncio
+    async def test_owner_can_stop(self):
         mock_container = MagicMock()
         mock_container.labels = {"owner": "client1"}
         mock_container.name = "duckstation-test123"
         main.client.containers.get = MagicMock(return_value=mock_container)
 
         request = main.StopRequest(client_id="client1")
-        result = main.stop_session("test123", request)
+        result = await main.stop_session("test123", request)
         mock_container.remove.assert_called_once_with(force=True)
 
-    def test_non_owner_gets_403(self):
+    @pytest.mark.asyncio
+    async def test_non_owner_gets_403(self):
         mock_container = MagicMock()
         mock_container.labels = {"owner": "client1"}
         main.client.containers.get = MagicMock(return_value=mock_container)
@@ -630,7 +658,7 @@ class TestStopSessionAPI:
         from fastapi import HTTPException
         request = main.StopRequest(client_id="wrong-client")
         with pytest.raises(HTTPException) as exc_info:
-            main.stop_session("test123", request)
+            await main.stop_session("test123", request)
         assert exc_info.value.status_code == 403
 
 
@@ -742,19 +770,67 @@ class TestRomCache:
 # 13. WATCHDOG
 # ============================================================================
 
-class TestWatchdog:
-    """Tests for watchdog.py idle session cleanup logic."""
+# ============================================================================
+# 13. WATCHDOG — Actual Function Tests
+# ============================================================================
+
+class TestWatchdogFunctions:
+    """Tests that call the real watchdog functions under mocked Docker."""
 
     def test_grace_period_skips_new_containers(self):
-        """Containers < 120s old should be skipped."""
-        from datetime import datetime
-        # Container created "now" (< 120s ago)
-        created = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S") + ".000000000Z"
+        """Containers < 120s old must be skipped regardless of activity."""
+        created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + ".000Z"
         container = MagicMock()
         container.attrs = {"Created": created}
-        container.id = "grace-test"
-        uptime = (datetime.utcnow() - datetime.strptime(created[:19], "%Y-%m-%dT%H:%M:%S")).total_seconds()
-        assert uptime < 120, "New container should be within grace period"
+        container.name = "duckstation-grace"
+
+        _, is_active, skip_reason = watchdog_module._check_single_container(container)
+        assert skip_reason == "grace_period"
+        assert is_active is None
+
+    def test_old_container_with_tcp_activity_is_active(self):
+        """Container older than 120s with TCP ESTAB on :3000 → active."""
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%S")
+        container = MagicMock()
+        container.attrs = {"Created": old_time + ".000Z"}
+        container.name = "duckstation-active"
+        # Simulate ss finding an ESTAB connection
+        container.exec_run.return_value = (0, b"ESTAB")
+
+        _, is_active, skip_reason = watchdog_module._check_single_container(container)
+        assert skip_reason is None
+        assert is_active is True
+
+    def test_old_container_with_running_game_status_is_active(self):
+        """Container with no TCP ESTAB but RUNNING_GAME status → still active (WebRTC UDP)."""
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+        container = MagicMock()
+        container.attrs = {"Created": old_time + ".000Z"}
+        container.name = "duckstation-webrtc"
+        # First exec (ss) finds nothing; second exec (session_status) returns RUNNING_GAME
+        container.exec_run.side_effect = [
+            (1, b""),               # Signal 1: no TCP ESTAB
+            (0, b"RUNNING_GAME"),   # Signal 2: session_status file
+        ]
+
+        _, is_active, skip_reason = watchdog_module._check_single_container(container)
+        assert skip_reason is None
+        assert is_active is True
+
+    def test_old_container_with_no_activity_is_inactive(self):
+        """Container with no TCP ESTAB and non-RUNNING_GAME status → inactive."""
+        old_time = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S")
+        container = MagicMock()
+        container.attrs = {"Created": old_time + ".000Z"}
+        container.name = "duckstation-idle"
+        container.exec_run.side_effect = [
+            (1, b""),           # Signal 1: no TCP ESTAB
+            (0, b"STOPPED"),    # Signal 2: emulator already stopped
+        ]
+
+        _, is_active, skip_reason = watchdog_module._check_single_container(container)
+        assert skip_reason is None
+        assert is_active is False
 
     def test_idle_timeout_from_env(self):
         with patch.dict(os.environ, {"IDLE_TIMEOUT_MINS": "15"}, clear=False):
@@ -766,6 +842,76 @@ class TestWatchdog:
             os.environ.pop("IDLE_TIMEOUT_MINS", None)
             val = int(os.getenv("IDLE_TIMEOUT_MINS", "30"))
             assert val == 30
+
+
+# ============================================================================
+# 14. PS1 SESSION — End-to-End Test
+# ============================================================================
+
+class TestPS1SessionE2E:
+    """End-to-end tests for the PS1 start_session flow with a mocked Docker client."""
+
+    @pytest.mark.asyncio
+    async def test_ps1_session_injects_all_security_vars(self, rom_dir, cache_dir):
+        """A real PS1 start (cache disabled) must inject all 11 security hardening vars."""
+        main.RATE_LIMIT_SESSIONS_PER_MIN = 100
+        main.MAX_HOST_CPU_PERCENT = 100
+        main.MAX_HOST_MEM_PERCENT = 100
+        main.ROM_CACHE_MAX_MB = 0      # Disable cache to skip extraction
+        main.HOST_ROM_DIR = rom_dir
+
+        _create_zip(rom_dir, "TestGame.zip")
+
+        mock_container = MagicMock()
+        mock_container.id = "abc123deadbeef"
+        mock_container.name = "duckstation-testid"
+        main.client.containers.list = MagicMock(return_value=[])
+        main.client.containers.run = MagicMock(return_value=mock_container)
+
+        request = main.SessionRequest(
+            game_filename="TestGame.zip",
+            client_id="test-e2e-client",
+            platform="ps1"
+        )
+        result = await main.start_session(request)
+
+        assert "session_id" in result
+        assert result["url_path"].startswith("/")
+        assert "password" in result
+
+        call_kwargs = main.client.containers.run.call_args[1]
+        env = call_kwargs["environment"]
+        required_security = [
+            "HARDEN_DESKTOP", "DISABLE_OPEN_TOOLS", "DISABLE_SUDO",
+            "DISABLE_TERMINALS", "DISABLE_CLOSE_BUTTON", "DISABLE_MOUSE_BUTTONS",
+            "HARDEN_KEYBINDS", "SELKIES_COMMAND_ENABLED",
+            "SELKIES_UI_SIDEBAR_SHOW_FILES", "SELKIES_UI_SIDEBAR_SHOW_APPS",
+            "SELKIES_FILE_TRANSFERS"
+        ]
+        for var in required_security:
+            assert var in env, f"Missing security env var in Docker call: {var}"
+        assert env["DISABLE_SUDO"] == "true"
+        assert env["HARDEN_DESKTOP"] == "true"
+        assert env["SELKIES_COMMAND_ENABLED"] == "False"
+        assert env["SELKIES_FILE_TRANSFERS"] == ""
+
+    @pytest.mark.asyncio
+    async def test_path_traversal_rejected(self, rom_dir):
+        """Filenames with path traversal sequences must be rejected with 400."""
+        main.RATE_LIMIT_SESSIONS_PER_MIN = 100
+        main.MAX_HOST_CPU_PERCENT = 100
+        main.MAX_HOST_MEM_PERCENT = 100
+        main.client.containers.list = MagicMock(return_value=[])
+
+        from fastapi import HTTPException
+        request = main.SessionRequest(
+            game_filename="../../etc/passwd.zip",
+            client_id="attacker",
+            platform="ps1"
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await main.start_session(request)
+        assert exc_info.value.status_code == 400
 
 
 # ============================================================================
@@ -797,12 +943,13 @@ class TestAdminAPI:
         assert "sessions" in result
         assert "host" in result
 
-    def test_admin_stop_session(self):
+    @pytest.mark.asyncio
+    async def test_admin_stop_session(self):
         mock_container = MagicMock()
         mock_container.name = "duckstation-killme"
         main.client.containers.get = MagicMock(return_value=mock_container)
 
-        result = main.admin_stop_session("killme")
+        result = await main.admin_stop_session("killme")
         mock_container.remove.assert_called_once_with(force=True)
 
 
