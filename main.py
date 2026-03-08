@@ -185,11 +185,14 @@ async def metrics_collector():
                     sid, data = res
                     metrics_cache[sid] = data
                     running_ids.append(sid)
-            
             # 3. Precise Cleanup
             old_keys = list(metrics_cache.keys())
             for sid in old_keys:
                 if sid not in running_ids:
+                    # Do not clean up pre-container statuses from the background task
+                    cached_status = metrics_cache[sid].get("status")
+                    if cached_status in ("extracting_rom", "initializing", "error"):
+                        continue
                     logger.info(f"🧹 Cleaning up stale session {sid} from cache")
                     del metrics_cache[sid]
 
