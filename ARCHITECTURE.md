@@ -2,6 +2,9 @@
 
 This document provides a comprehensive overview of the PS1 Engine architecture, backend API, and core workflows.
 
+> [!NOTE]
+> **Quick Facts**: The Orchestrator (`main.py`) is the only backend binary. **Traefik is the sole public-facing port** — nothing else is exposed. Config is split across two files: `.env` (Docker Compose, host-level) and `config.env` (runtime tuning, read by the app). After any config change, restart with `./start.sh`.
+
 ---
 
 ## 🏗️ System Architecture
@@ -31,38 +34,44 @@ These are consumed by `docker-compose.yml` for bind mounts, Traefik routing rule
 | Variable | Default | Description | Consumed By |
 |---|---|---|---|
 | `DOMAIN_LOCAL` | `ps1.lan` | LAN domain for Traefik routing rules | `docker-compose.yml` Traefik labels |
-| `DOMAIN_REMOTE` | `ps1.yourdomain.com` | WAN domain for Traefik routing rules; also read by `main.py` as `DOMAIN` | `docker-compose.yml` Traefik labels, `main.py` L214 |
-| `HOST_ROM_DIR` | `/path/to/ROMs/PSX` | Absolute host path to PS1 ROMs | `docker-compose.yml` bind mount, `main.py` L224 |
+| `DOMAIN_REMOTE` | `ps1.yourdomain.com` | WAN domain for Traefik routing rules; also read by `main.py` as `DOMAIN` | `docker-compose.yml` Traefik labels, `load_app_config()` |
+| `HOST_ROM_DIR` | `/path/to/ROMs/PSX` | Absolute host path to PS1 ROMs | `docker-compose.yml` bind mount, `load_app_config()` |
 | `HOST_SNES_ROM_DIR` | `./userdata/snes` | Host path to SNES ROMs | `docker-compose.yml` bind mount |
 | `HOST_GBA_ROM_DIR` | `./userdata/gba` | Host path to GBA ROMs | `docker-compose.yml` bind mount |
-| `HOST_BIOS_DIR` | `/path/to/ROMs/BIOS` | Host path to PS1 BIOS files | `docker-compose.yml` bind mount, `main.py` L225 |
-| `HOST_CACHE_DIR` | `/tmp/ps1cache` | Host path for extracted ROM cache | `docker-compose.yml` bind mount, `main.py` L226 |
+| `HOST_BIOS_DIR` | `/path/to/ROMs/BIOS` | Host path to PS1 BIOS files | `docker-compose.yml` bind mount, `load_app_config()` |
+| `HOST_CACHE_DIR` | `/tmp/ps1cache` | Host path for extracted ROM cache | `docker-compose.yml` bind mount, `load_app_config()` |
 
 ### 2. `config.env` — Runtime Engine Settings
-Loaded by the Orchestrator (`main.py` L29-30) and Watchdog (`watchdog.py` L8) via `python-dotenv`. Changes require a service restart (`./start.sh`).
+Loaded by the Orchestrator (`load_app_config()`) and Watchdog (startup) via `python-dotenv`. Changes require a service restart (`./start.sh`).
 
 | Variable | Default | Description | Consumed By |
 |---|---|---|---|
-| `RESOLUTION_SCALE` | `1` | Rendering profile: 1=Software (efficient), 2=Vulkan Mid, 3+=Vulkan High | `main.py` L456 → injected into container env |
-| `CPUS_PER_SESSION` | `2.0` | CPU cores per session (Docker `nano_cpus`) | `main.py` L215, L557 |
-| `MEM_LIMIT_PER_SESSION` | `2g` | RAM limit per container | `main.py` L218, L558 |
-| `AUDIO_BACKEND` | `Cubeb` | Audio backend: Cubeb, PulseAudio, ALSA, Null | `main.py` L468 → injected into container env |
-| `STREAM_BITRATE` | `2000` | Video bitrate in kbps. Injected as `SELKIES_VIDEO_BITRATE` — sets the initial bitrate directly on the selkies-gstreamer process. LSIO also offers `SELKIES_H264_CRF` for web UI quality control; both coexist. | `main.py` L470 → injected into container env |
-| `STREAM_FRAMERATE` | `30` | Max FPS. Injected as `SELKIES_VIDEO_FRAMERATE` — sets the initial framerate on the selkies-gstreamer process. LSIO also offers `SELKIES_FRAMERATE` for web UI slider; both coexist. | `main.py` L470 → injected into container env |
-| `STREAM_QUALITY` | `50` | Encoder quality (1-100). Mapped to `SELKIES_H264_CRF` (CRF 50-5, lower=better). | `main.py` L458 → injected into container env |
-| `SHOW_FPS` | `false` | Show FPS counters in emulator. Injected into container; consumed by `custom_autostart.sh` `[Display] ShowFPS`. | `main.py` L474 → injected into container env |
-| `ENABLE_DEBUG_MODE` | `false` | When `true`, shows DEBUG_MODE_FULL_ACCESS card; mounts full `/roms` | `main.py` L31, L206, L482-484, L808 |
-| `ROM_CACHE_MAX_MB` | `5000` | Max disk space for extracted ROM cache in MB (0=disabled) | `main.py` L216, L345 |
-| `MAX_HOST_CPU_PERCENT` | `90` | Host CPU load (%) threshold before blocking new sessions | `main.py` L219, L251 |
-| `MAX_HOST_MEM_PERCENT` | `90` | Host RAM usage (%) threshold before blocking new sessions | `main.py` L220, L262 |
-| `RATE_LIMIT_SESSIONS_PER_MIN` | `3` | Max session launch requests per client per minute | `main.py` L221, L239 |
-| `IDLE_TIMEOUT_MINS` | `30` | Minutes of inactivity before watchdog kills a session | `watchdog.py` L66 |
-| `NETWORK_NAME` | `emulator-net` | Docker network name for spawned containers | `main.py` L211, L555 |
-| `IMAGE_NAME` | `custom-duckstation` | Docker image for session containers | `main.py` L212, L554 |
-| `COVERS_DIR` | `/app/userdata/covers` | Path to cached cover art images | `main.py` L217, L686 |
+| `RESOLUTION_SCALE` | `1` | Rendering profile: 1=Software (efficient), 2=Vulkan Mid, 3+=Vulkan High | `start_session()` → injected into container env |
+| `CPUS_PER_SESSION` | `2.0` | CPU cores per session (Docker `nano_cpus`) | `load_app_config()`, `start_session()` |
+| `MEM_LIMIT_PER_SESSION` | `2g` | RAM limit per container | `load_app_config()`, `start_session()` |
+| `AUDIO_BACKEND` | `Cubeb` | Audio backend: Cubeb, PulseAudio, ALSA, Null | `start_session()` → injected into container env |
+| `STREAM_BITRATE` | `2000` | Video bitrate in kbps. Injected as `SELKIES_VIDEO_BITRATE` — sets the initial bitrate directly on the selkies-gstreamer process. LSIO also offers `SELKIES_H264_CRF` for web UI quality control; both coexist. | `start_session()` → injected into container env |
+| `STREAM_FRAMERATE` | `30` | Max FPS. Injected as `SELKIES_VIDEO_FRAMERATE` — sets the initial framerate on the selkies-gstreamer process. LSIO also offers `SELKIES_FRAMERATE` for web UI slider; both coexist. | `start_session()` → injected into container env |
+| `STREAM_QUALITY` | `50` | Encoder quality (1-100). Mapped to `SELKIES_H264_CRF` (CRF 50-5, lower=better). | `start_session()` → injected into container env |
+| `SHOW_FPS` | `false` | Show FPS counters in emulator. Injected into container; consumed by `custom_autostart.sh` `[Display] ShowFPS`. | `start_session()` → injected into container env |
+| `ENABLE_DEBUG_MODE` | `false` | When `true`, shows DEBUG_MODE_FULL_ACCESS card; mounts full `/roms` | `load_app_config()`, `start_session()` |
+| `ROM_CACHE_MAX_MB` | `5000` | Max disk space for extracted ROM cache in MB (0=disabled) | `load_app_config()`, `get_or_extract_rom_set()` |
+| `MAX_HOST_CPU_PERCENT` | `90` | Host CPU load (%) threshold before blocking new sessions | `load_app_config()`, `check_host_resources()` |
+| `MAX_HOST_MEM_PERCENT` | `90` | Host RAM usage (%) threshold before blocking new sessions | `load_app_config()`, `check_host_resources()` |
+| `RATE_LIMIT_SESSIONS_PER_MIN` | `3` | Max session launch requests per client per minute | `load_app_config()`, `is_rate_limited()` |
+| `IDLE_TIMEOUT_MINS` | `30` | Minutes of inactivity before watchdog kills a session | `watchdog_loop()` |
+| `NETWORK_NAME` | `emulator-net` | Docker network name for spawned containers | `load_app_config()`, `start_session()` |
+| `IMAGE_NAME` | `custom-duckstation` | Docker image for session containers | `load_app_config()`, `start_session()` |
 
-> [!NOTE]
-> `watchdog.py` **hardcodes** `emulator-net` and `custom-duckstation` in its container filter (L35) rather than reading `NETWORK_NAME`/`IMAGE_NAME` from config. Only `IDLE_TIMEOUT_MINS` is dynamically loaded.
+### 3. Container-Internal Defaults (overridable via `docker-compose.yml` `environment:`)
+These variables are read by the Orchestrator at runtime via `os.getenv()` but are **not** exposed in `config.env`. Set them in the `environment:` block of `docker-compose.yml` if you need to override the defaults.
+
+| Variable | Default | Description |
+|---|---|---|
+| `COVERS_DIR` | `/app/userdata/covers` | Path inside the orchestrator container where cover art images are cached. Read by `load_app_config()`. |
+
+> [!WARNING]
+> `watchdog.py` **hardcodes** `emulator-net` and `custom-duckstation` in its container filter rather than reading `NETWORK_NAME`/`IMAGE_NAME` from config. Only `IDLE_TIMEOUT_MINS` is dynamically loaded. **If you change `NETWORK_NAME` or `IMAGE_NAME` in `config.env`, you MUST also manually update the corresponding string literals in `watchdog_loop()` until this is resolved.**
 
 ---
 
@@ -79,13 +88,13 @@ Traefik is the **only service exposed** to host ports 80 (HTTP) and 443 (HTTPS).
   - `/admin` or `/api/admin/*` → **Admin API** (admin-auth protected)
 
 ### 2. Routing Priority Hierarchy
-| Priority | Router | Auth? | Description |
-|:---|:---|:---|:---|
-| **100** | `duckstation-{id}` | Session Password | Game stream. Injected dynamically via Docker labels at container creation. |
-| **40** | `orchestrator-admin` | **YES** (Basic Auth) | Admin APIs (`/api/admin/`) and Dashboard (`/admin`). |
-| **30** | `orchestrator-api` | No | Public APIs: ROM list, start/stop session, art, status. |
-| **20** | `traefik-dashboard` | **YES** (Basic Auth) | Traefik internal dashboard at `/dashboard/`. |
-| **1** | `orchestrator-secure` | No | Catch-all — serves the SPA frontend. |
+| Priority | Router | Auth? | Description | Why this priority? |
+|:---|:---|:---|:---|:---|
+| **100** | `duckstation-{id}` | Session Password | Game stream. Injected dynamically via Docker labels at container creation. | Must beat all static routes so game sessions are always reachable. |
+| **40** | `orchestrator-admin` | **YES** (Basic Auth) | Admin APIs (`/api/admin/`) and Dashboard (`/admin`). | Higher than public API to ensure admin paths can never be shadowed. |
+| **30** | `orchestrator-api` | No | Public APIs: ROM list, start/stop session, art, status. | Explicit `/api/` prefix routes above the catch-all. |
+| **20** | `traefik-dashboard` | **YES** (Basic Auth) | Traefik internal dashboard at `/dashboard/`. | Lowest named route; below all application routes. |
+| **1** | `orchestrator-secure` | No | Catch-all — serves the SPA frontend. | Priority 1 ensures it only fires if nothing else matched. |
 
 ### 3. URL Reference
 All public URLs use the domains defined in `.env`:
@@ -124,10 +133,13 @@ All public URLs use the domains defined in `.env`:
 | `GET` | `/admin` | Serves the admin dashboard HTML page. |
 
 ### WASM Platforms (SNES, GBA)
-When `platform` is not `ps1`, the Orchestrator returns a static URL to the browser-based emulator instead of spawning a Docker container:
+When `platform` is not `ps1`, the Orchestrator **does not spawn a Docker container**. Instead, it immediately returns a static URL pointing to the browser-based emulator:
 ```
 /emulator.html?core={platform}&rom=/rom-files/{platform}/{encoded_rom}
 ```
+- The ROM files are served directly by FastAPI's `StaticFiles` mount — PS1 uses extracted containers, but SNES/GBA ROMs are served as static files via `/rom-files/snes/` and `/rom-files/gba/` respectively (see `main.py` end of file for mount declarations).
+- Supported platforms: `snes`, `gba`.
+- No resource limits, watchdog, or session tracking apply — the entire emulator runs in the user's browser (WebAssembly).
 
 ---
 
@@ -165,8 +177,8 @@ sequenceDiagram
     Traefik->>Container: Reverse proxy to container port 3000
     Container-->>Browser: Stream Video & Audio via Selkies WebRTC
 
-    loop Background Heartbeat (Every 4s)
-        API->>Docker: metrics_collector checks all containers
+    loop Background Heartbeat (Every 4s, parallel across all sessions)
+        API->>Docker: metrics_collector checks all containers via asyncio.gather
         API->>API: Updates metrics_cache dict
     end
 ```
@@ -183,7 +195,7 @@ sequenceDiagram
 
 ## 🔒 Container Security Hardening
 
-Every game session container is launched with these security environment variables (set in `main.py` L473-478):
+Every game session container is launched with these security environment variables (set in `start_session()`):
 
 | Variable | Value | Purpose |
 |---|---|---|
@@ -205,18 +217,24 @@ Additionally, DNS "blackholing" is applied via `extra_hosts`:
 
 This prevents DuckStation from hanging on update checks.
 
+> [!WARNING]
+> `SELKIES_MICROPHONE_ENABLED` is **not overridden**, meaning it defaults to `True` (microphone passthrough is enabled). On a shared multi-user platform this has privacy implications. Consider explicitly injecting `"SELKIES_MICROPHONE_ENABLED": "False"` in `start_session()` if microphone access is not required.
+
+> [!NOTE]
+> The FastAPI app uses a **fully open CORS policy** (`allow_origins=["*"]`). This is intentional and safe **only because Traefik is the sole public entry point** and the Orchestrator listens exclusively on the internal Docker network. If you deploy the Orchestrator without Traefik, you must restrict `allow_origins` to your actual domain.
+
 ---
 
 ## 📡 Selkies Streaming Variables (LSIO Base Image)
 
-The DuckStation container is based on [docker-baseimage-selkies](https://github.com/linuxserver/docker-baseimage-selkies). Below are the **streaming-related** Selkies env vars available for injection. Variables marked ✅ are currently set by `main.py`; ⬜ are available but unused.
+The DuckStation container is based on [docker-baseimage-selkies](https://github.com/linuxserver/docker-baseimage-selkies). Below are the **streaming-related** Selkies env vars available for injection. Variables marked ✅ are currently set by `start_session()`; ⬜ are available but unused.
 
 ### Video & Encoding
 | Variable | Default | Type | Status | Description |
 |---|---|---|---|---|
 | `SELKIES_ENCODER` | `x264enc,x264enc-striped,jpeg` | Enum | ⬜ | Comma-separated encoder list. First = default. |
-| `SELKIES_FRAMERATE` | `8-120` | Range | ⬜ | FPS range or fixed value. **This is the correct framerate var for LSIO.** |
-| `SELKIES_H264_CRF` | `5-50` | Range | ⬜ | H.264 Constant Rate Factor (lower = higher quality/bitrate). **This is the correct quality control for LSIO.** |
+| `SELKIES_FRAMERATE` | `8-120` | Range | ⬜ | FPS range for LSIO web UI slider. **Not injected** — `SELKIES_VIDEO_FRAMERATE` (upstream) is used instead to set gstreamer directly. |
+| `SELKIES_H264_CRF` | `5-50` | Range | ✅ | H.264 Constant Rate Factor. **Wired to `STREAM_QUALITY`** (quality 1–100 → CRF 50–5, lower = higher quality). |
 | `SELKIES_JPEG_QUALITY` | `1-100` | Range | ⬜ | JPEG encoder quality (when using `jpeg` encoder). |
 | `SELKIES_H264_FULLCOLOR` | `False` | Bool | ⬜ | Full color range for H.264. |
 | `SELKIES_H264_STREAMING_MODE` | `False` | Bool | ⬜ | Streaming optimization mode. |
@@ -232,7 +250,7 @@ The DuckStation container is based on [docker-baseimage-selkies](https://github.
 |---|---|---|---|
 | `SELKIES_AUDIO_ENABLED` | `True` | ⬜ | Enable/disable audio streaming. |
 | `SELKIES_AUDIO_BITRATE` | `320000` | ✅ | Audio bitrate in bps. |
-| `SELKIES_MICROPHONE_ENABLED` | `True` | ⬜ | Enable microphone passthrough. |
+| `SELKIES_MICROPHONE_ENABLED` | `True` | ⬜ | Enable microphone passthrough. **Defaults to enabled — see security note above.** |
 
 ### UI Controls
 | Variable | Default | Status | Description |
@@ -249,7 +267,7 @@ The DuckStation container is based on [docker-baseimage-selkies](https://github.
 | `SELKIES_GAMEPAD_ENABLED` | `True` | ⬜ | Gamepad input passthrough. |
 | `SELKIES_CLIPBOARD_ENABLED` | `True` | ⬜ | Clipboard passthrough. |
 
-> **ℹ️ Note**: `main.py` injects `SELKIES_VIDEO_BITRATE` and `SELKIES_VIDEO_FRAMERATE` (upstream selkies-gstreamer vars) which set the **initial stream defaults** directly on the gstreamer process. LSIO also offers `SELKIES_H264_CRF` and `SELKIES_FRAMERATE` which control the **web UI sliders**. Both mechanisms coexist — the upstream vars work, while the LSIO vars could optionally be added to let users adjust quality via the Selkies sidebar.
+> **ℹ️ Note**: `start_session()` injects `SELKIES_VIDEO_BITRATE` and `SELKIES_VIDEO_FRAMERATE` (upstream selkies-gstreamer vars) which set the **initial stream defaults** directly on the gstreamer process. LSIO also offers `SELKIES_H264_CRF` and `SELKIES_FRAMERATE` which control the **web UI sliders**. Both mechanisms coexist — the upstream vars work, while the LSIO vars could optionally be added to let users adjust quality via the Selkies sidebar.
 
 ---
 
@@ -259,13 +277,33 @@ Inside each DuckStation container, the `custom_autostart.sh` script orchestrates
 
 1. **X Server Wait** — Polls `xdpyinfo` up to 30s, writing `WAITING_FOR_X` to `/tmp/session_status`.
 2. **Window Manager Wait** — Polls for `openbox` process up to 15s, writing `WAITING_FOR_WM`.
-3. **DuckStation Config** — Generates `settings.ini` from Docker env vars (`RENDERER`, `RESOLUTION_SCALE`, `TEXTURE_FILTERING`, `VSYNC`, `AUDIO_BACKEND`, etc.).
+3. **DuckStation Config** — Generates `settings.ini` from Docker env vars (`RENDERER`, `RESOLUTION_SCALE`, `TEXTURE_FILTERING`, `VSYNC`, `AUDIO_BACKEND`, `SHOW_FPS`, etc.).
 4. **ROM Handling** — If `ROM_PRECACHED=true`, mounts the pre-extracted directory. Otherwise, unzips the mounted `.zip` in-container.
 5. **PTY Launch** — Uses a Python script with `pty.openpty()` to trick DuckStation into thinking it's in an interactive terminal, preventing headless hangs.
 6. **Lifecycle** — When DuckStation exits, the PTY launcher writes `STOPPED` to `/tmp/session_status`. The background heartbeat collector in the Orchestrator detects this state and safely terminates the container via the Docker API.
 
 Status markers written to `/tmp/session_status`:
-`INITIALIZING` → `WAITING_FOR_X` → `WAITING_FOR_WM` → `INITIALIZING` → `RUNNING_GAME` → `STOPPED` or `ERROR`
+
+```
+INITIALIZING (pre-launch)
+  → WAITING_FOR_X
+  → WAITING_FOR_WM
+  → INITIALIZING (post-WM, pre-game — script resets status before launching DuckStation)
+  → RUNNING_GAME
+  → STOPPED | ERROR
+```
+
+> [!NOTE]
+> The second `INITIALIZING` is intentional — the script resets the status marker after the WM is confirmed ready, immediately before handing off to the emulator. This is not a typo.
+
+### Game Context Environment Variables
+These env vars are injected per-session by `start_session()` and are the primary communication channel between the Orchestrator and `custom_autostart.sh`:
+
+| Variable | Example Value | Purpose |
+|---|---|---|
+| `GAME_ROM` | `/roms/Metal Gear Solid (Disc 1).cue` | Full in-container path to the ROM or playlist. Empty string in debug mode. |
+| `GAME_NAME` | `Metal Gear Solid` | Human-readable game name (multi-disc base name), used for logging. |
+| `ROM_PRECACHED` | `true` | When set, tells `custom_autostart.sh` to skip in-container extraction and use the pre-mounted host cache directory. |
 
 ---
 
@@ -334,6 +372,7 @@ The `/api/roms` endpoint runs `glob.glob()` for PS1, SNES, and GBA directories i
 |---|---|---|---|
 | CPU per session | `CPUS_PER_SESSION` | `2.0` | Docker `nano_cpus` |
 | RAM per session | `MEM_LIMIT_PER_SESSION` | `2g` | Docker `mem_limit` |
+| Shared memory per session | (hardcoded) | `1gb` | Docker `shm_size`; required for X11/Selkies stack. At 40 sessions this is 40GB of shm — ensure host has sufficient memory. |
 | Host CPU gate | `MAX_HOST_CPU_PERCENT` | `90` | Checked before every launch |
 | Host RAM gate | `MAX_HOST_MEM_PERCENT` | `90` | Checked before every launch |
 | Launch rate | `RATE_LIMIT_SESSIONS_PER_MIN` | `3` | Per-client sliding window |
@@ -351,6 +390,7 @@ The `/api/roms` endpoint runs `glob.glob()` for PS1, SNES, and GBA directories i
 
 ## 📂 File System Overview
 
+### Application Files
 | File | Purpose |
 |---|---|
 | `main.py` | Orchestrator — session logic, Docker management, all API endpoints |
@@ -369,6 +409,17 @@ The `/api/roms` endpoint runs `glob.glob()` for PS1, SNES, and GBA directories i
 | `LICENSE` | AGPL-3.0 license |
 | `tests/` | Unit and regression tests |
 
+### Operational & Reference Documents
+| File | Purpose |
+|---|---|
+| `ARCHITECTURE.md` | This document — full technical reference |
+| `PROJECT_BLUEPRINT.md` | Compact AI/developer onboarding summary ("DNA" of the engine) |
+| `walkthrough.md` | Step-by-step operational walkthrough |
+| `TODO.md` | Planned features, known gaps, and open issues |
+| `.env.example` | Template for `.env` with all keys documented |
+| `config.env.example` | Template for `config.env` with all keys documented |
+| `install_docker.sh` | Helper script for Docker installation on fresh hosts |
+
 ---
 
 ## 🧪 Testing
@@ -384,10 +435,22 @@ pytest tests/test_engine.py -v --tb=short
 ### Architecture & Coverage
 The test suite uses the `pytest` framework and heavily relies on `unittest.mock` to validate logic *without* needing a live Docker daemon or heavy containers. It specifically mocks `docker.from_env()`.
 
-**Key Test Coverage Area:**
+**Key Test Coverage Areas:**
 1. **Configuration Cascade**: Verifies fallback defaults and parsing logic for `.env` and `config.env` overrides.
 2. **Rate Limiting**: Tests the sliding window implementation.
 3. **Multi-Disc Detection**: Validates Regex patterns matching sibling discs `(Disc 1)`, `(Disc 2)`, etc.
 4. **Graphics Selection**: Checks the resolution scale-to-renderer mapping (`Software` vs `Vulkan`).
 5. **Security Hardening**: Asserts that critical security variables (e.g. `DISABLE_SUDO`, `HARDEN_DESKTOP`) are present.
 6. **Watchdog**: Verifies grace period logic and API status matching.
+
+---
+
+## 🔧 Known Technical Debt
+
+| Issue | Location | Details |
+|---|---|---|
+| Watchdog hardcodes network/image names | `watchdog_loop()` | `NETWORK_NAME` and `IMAGE_NAME` from `config.env` are ignored; strings are duplicated in code. |
+| `asyncio.get_event_loop()` deprecation | `start_session()`, `get_rom_art()`, `list_roms()` | Deprecated in Python 3.10+. Should migrate to `asyncio.get_running_loop()` inside async functions. |
+| No `MAX_CONCURRENT_LAUNCHES` | `start_session()` | Mass simultaneous logins can cause CPU/IO spikes during parallel extraction. A task queue (`asyncio.Queue`) would decouple launch requests from extraction workers. |
+| Adaptive jitter missing | `metrics_collector()` | All sessions report simultaneously, creating periodic mini-spikes. Random sleep jitter per session would distribute load. |
+| Persistent save states | `start_session()` | No per-user save directory is mounted. Progress is lost when a session ends. |
