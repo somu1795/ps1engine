@@ -24,8 +24,11 @@ if [ ! -f "config.env" ]; then
 fi
 
 # 1. Build the custom DuckStation image
-echo "📦 Building custom DuckStation image (No Cache)..."
-docker build -t custom-duckstation -f Dockerfile.duckstation .
+echo "📦 Building custom DuckStation image (version: ${DUCKSTATION_VERSION:-latest})..."
+docker build \
+    --build-arg DUCKSTATION_VERSION=${DUCKSTATION_VERSION:-latest} \
+    -t custom-duckstation \
+    -f Dockerfile.duckstation .
 
 if [ $? -ne 0 ]; then
     echo "❌ DuckStation build failed."

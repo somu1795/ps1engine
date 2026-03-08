@@ -45,6 +45,39 @@ logging.getLogger("uvicorn.access").addFilter(EndpointFilter())
 metrics_cache = {} # session_id -> metrics dict
 host_metrics = {"cpu": 0.0, "ram": 0.0}
 
+# ---------------------------------------------------------------------------
+# Platform Registry
+# Describes every platform the engine knows about. Actual availability at
+# runtime is controlled by ENABLED_PLATFORMS in config.env — no code changes
+# needed to enable or disable a platform.
+# ---------------------------------------------------------------------------
+PLATFORM_REGISTRY: dict[str, dict] = {
+    "ps1": {
+        "display_name": "PlayStation 1",
+        "engine": "docker",      # Spawns a dedicated DuckStation container
+        "wasm_core": None,
+        "rom_dir_attr": "ROM_DIR",
+        "extensions": ["*.zip"],
+    },
+    "snes": {
+        "display_name": "Super Nintendo",
+        "engine": "wasm",        # Runs entirely in the browser (no container)
+        "wasm_core": "snes",
+        "rom_dir_attr": "SNES_ROM_DIR",
+        "extensions": ["*.zip"],
+    },
+    "gba": {
+        "display_name": "Game Boy Advance",
+        "engine": "wasm",
+        "wasm_core": "gba",
+        "rom_dir_attr": "GBA_ROM_DIR",
+        "extensions": ["*.zip"],
+    },
+}
+
+# Runtime availability set — populated by load_app_config()
+ENABLED_PLATFORMS: set[str] = set(PLATFORM_REGISTRY.keys())
+
 # --- Background Metrics Collector ---
 def _collect_container_metrics(container):
     """Aggregated status check to minimize Docker exec overhead."""
@@ -209,6 +242,7 @@ def load_app_config():
     global MAX_HOST_CPU_PERCENT, MAX_HOST_MEM_PERCENT, RATE_LIMIT_SESSIONS_PER_MIN
     global ENABLE_DEBUG_MODE
     global HOST_ROM_DIR, HOST_BIOS_DIR, HOST_CACHE_DIR
+    global ENABLED_PLATFORMS
 
     load_dotenv(CONFIG_ENV_PATH, override=True)
     
@@ -233,6 +267,17 @@ def load_app_config():
     HOST_ROM_DIR = os.getenv("HOST_ROM_DIR", ROM_DIR)
     HOST_BIOS_DIR = os.getenv("HOST_BIOS_DIR", BIOS_DIR)
     HOST_CACHE_DIR = os.getenv("HOST_CACHE_DIR", ROM_CACHE_DIR)
+
+    # Platform Availability
+    raw_platforms = os.getenv("ENABLED_PLATFORMS", ",".join(PLATFORM_REGISTRY.keys()))
+    ENABLED_PLATFORMS = {
+        p.strip().lower() for p in raw_platforms.split(",")
+        if p.strip().lower() in PLATFORM_REGISTRY
+    }
+    if not ENABLED_PLATFORMS:
+        logger.warning("ENABLED_PLATFORMS is empty or invalid — defaulting to all platforms.")
+        ENABLED_PLATFORMS = set(PLATFORM_REGISTRY.keys())
+    logger.info(f"Enabled platforms: {sorted(ENABLED_PLATFORMS)}")
 
 # Initial load
 load_app_config()
@@ -408,6 +453,14 @@ async def start_session(request: SessionRequest):
     # 1. Rate Limiting (Prevent spamming the start button)
     if is_rate_limited(request.client_id):
         raise HTTPException(status_code=429, detail="Too many launch requests. Please wait a minute.")
+
+    # 2. Platform Availability Check
+    if request.platform not in ENABLED_PLATFORMS:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Platform '{request.platform}' is not available on this server. "
+                   f"Available: {sorted(ENABLED_PLATFORMS)}"
+        )
 
     # 2. Host Health Check (Safety Valve)
     is_healthy, reason = check_host_resources()
@@ -810,31 +863,40 @@ def get_admin_page():
 async def list_roms():
     debug_enabled = ENABLE_DEBUG_MODE
     loop = asyncio.get_event_loop()
-    
-    # Run all 3 glob operations in parallel (significant on network mounts)
-    def _glob_ps1(): return glob.glob(os.path.join(ROM_DIR, "*.zip"))
-    def _glob_snes(): return glob.glob(os.path.join(SNES_ROM_DIR, "*.zip"))
-    def _glob_gba(): return glob.glob(os.path.join(GBA_ROM_DIR, "*.zip"))
-    
-    ps1_future = loop.run_in_executor(None, _glob_ps1)
-    snes_future = loop.run_in_executor(None, _glob_snes)
-    gba_future = loop.run_in_executor(None, _glob_gba)
-    all_zips, snes_zips, gba_zips = await asyncio.gather(ps1_future, snes_future, gba_future)
-    
+
+    # Only glob directories for enabled platforms (avoids I/O on disabled ones)
+    glob_futures: dict[str, asyncio.Future] = {}
+    if "ps1" in ENABLED_PLATFORMS:
+        glob_futures["ps1"] = loop.run_in_executor(None, lambda: glob.glob(os.path.join(ROM_DIR, "*.zip")))
+    if "snes" in ENABLED_PLATFORMS:
+        glob_futures["snes"] = loop.run_in_executor(None, lambda: glob.glob(os.path.join(SNES_ROM_DIR, "*.zip")))
+    if "gba" in ENABLED_PLATFORMS:
+        glob_futures["gba"] = loop.run_in_executor(None, lambda: glob.glob(os.path.join(GBA_ROM_DIR, "*.zip")))
+
+    glob_results: dict[str, list] = {}
+    if glob_futures:
+        keys = list(glob_futures.keys())
+        values = await asyncio.gather(*glob_futures.values())
+        glob_results = dict(zip(keys, values))
+
+    all_zips   = glob_results.get("ps1",  [])
+    snes_zips  = glob_results.get("snes", [])
+    gba_zips   = glob_results.get("gba",  [])
+
     seen_sets = set()
     rom_data = []
-    
+
     for f_path in sorted(all_zips):
         filename = os.path.basename(f_path)
         base_name = _identify_disc_set(filename)
         clean_name = base_name.replace(".zip", "").replace(".ZIP", "")
-        
+
         if clean_name in seen_sets:
             continue
-            
+
         seen_sets.add(clean_name)
         game_id = _safe_cache_key(base_name)
-        
+
         rom_data.append({
             "filename": filename,
             "display_name": clean_name,
@@ -842,33 +904,35 @@ async def list_roms():
             "poster_url": f"/api/rom-art/{game_id}",
             "platform": "ps1"
         })
-        
+
     snes_roms, gba_roms = [], []
     for f_path in snes_zips:
         if f_path.lower().endswith('.zip'):
             name = os.path.basename(f_path)
             s_name = os.path.splitext(name)[0]
             snes_roms.append({"filename": name, "display_name": s_name, "game_id": _safe_cache_key(s_name), "poster_url": f"/api/rom-art/{_safe_cache_key(s_name)}", "platform": "snes"})
-            
+
     for f_path in gba_zips:
         if f_path.lower().endswith('.zip'):
             name = os.path.basename(f_path)
             g_name = os.path.splitext(name)[0]
             gba_roms.append({"filename": name, "display_name": g_name, "game_id": _safe_cache_key(g_name), "poster_url": f"/api/rom-art/{_safe_cache_key(g_name)}", "platform": "gba"})
 
-    if debug_enabled: 
+    if debug_enabled:
         rom_data.insert(0, {
-            "filename": "DEBUG_MODE_FULL_ACCESS", 
+            "filename": "DEBUG_MODE_FULL_ACCESS",
             "display_name": "DEBUG_MODE_FULL_ACCESS",
             "game_id": "debug",
             "poster_url": "",
             "platform": "ps1"
         })
-        
+
     return {
-        "ps1": rom_data,
+        "ps1":  rom_data,
         "snes": sorted(snes_roms, key=lambda x: x['display_name']),
-        "gba": sorted(gba_roms, key=lambda x: x['display_name'])
+        "gba":  sorted(gba_roms,  key=lambda x: x['display_name']),
+        # Frontend can check this to know which tabs/sections to render
+        "enabled_platforms": sorted(ENABLED_PLATFORMS),
     }
 
 # Initialize static mounts safely outside

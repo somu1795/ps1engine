@@ -1,4 +1,5 @@
-FROM linuxserver/duckstation:latest
+ARG DUCKSTATION_VERSION=latest
+FROM linuxserver/duckstation:${DUCKSTATION_VERSION}
 
 # Install unzip for ZIP ROM extraction
 RUN apt-get update && apt-get install -y unzip && rm -rf /var/lib/apt/lists/*
